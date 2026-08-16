@@ -2,7 +2,6 @@ package app.practicelens.android
 
 import app.practicelens.android.drive.DRIVE_FILE_SCOPE
 import app.practicelens.android.drive.DriveBackupSettings
-import app.practicelens.android.drive.DriveSyncWorker
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,8 +20,8 @@ class DrivePolicyTest {
         assertFalse(settings.automaticSync)
     }
 
-    @Test fun `drive worker does not depend on camera packages`() {
-        val text = DriveSyncWorker::class.java.name
-        assertFalse(text.contains("camera", ignoreCase = true))
+    @Test fun `demo policy keeps drive disabled by default`() {
+        val settings = DriveBackupSettings()
+        assertFalse(settings.automaticSync)
     }
 }

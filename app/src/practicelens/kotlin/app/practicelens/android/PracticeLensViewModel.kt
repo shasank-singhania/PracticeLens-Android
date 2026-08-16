@@ -3,12 +3,14 @@ package app.practicelens.android
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.practicelens.android.core.EvaluationState
+import app.practicelens.android.core.MonotonicClock
 import app.practicelens.android.core.PracticeAttemptState
-import app.practicelens.android.core.PracticeOption
-import app.practicelens.android.core.PracticeQuestion
 import app.practicelens.android.core.PracticeReducer
 import app.practicelens.android.core.SystemMonotonicClock
 import app.practicelens.android.evaluation.EvaluatorFactory
+import app.practicelens.android.ocr.OcrDraft
+import app.practicelens.android.ocr.OcrObservation
+import app.practicelens.android.ocr.OcrOptionDraft
 import app.practicelens.android.ocr.OcrParser
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -18,8 +20,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class PracticeLensUiState(
+    val disclosureAccepted: Boolean = false,
     val cameraPermissionGranted: Boolean = false,
+    val cameraPermissionPermanentlyDenied: Boolean = false,
     val scanning: Boolean = false,
+    val scannerError: String? = null,
+    val ocrReview: OcrDraft? = null,
     val attempt: PracticeAttemptState? = null,
     val feedbackMode: String = "Feedback after each answer",
     val autoNextSeconds: Int = 5,
@@ -27,8 +33,10 @@ data class PracticeLensUiState(
     val autoNextProgress: Float = 0f,
 )
 
-class PracticeLensViewModel : ViewModel() {
-    private val reducer = PracticeReducer(SystemMonotonicClock)
+class PracticeLensViewModel(
+    private val clock: MonotonicClock = SystemMonotonicClock,
+) : ViewModel() {
+    private val reducer = PracticeReducer(clock)
     private val evaluator = EvaluatorFactory.create()
     private val parser = OcrParser()
     private var graceJob: Job? = null
@@ -36,27 +44,113 @@ class PracticeLensViewModel : ViewModel() {
     private val _uiState = MutableStateFlow(PracticeLensUiState())
     val uiState: StateFlow<PracticeLensUiState> = _uiState
 
-    fun setCameraPermission(granted: Boolean) {
-        _uiState.update { it.copy(cameraPermissionGranted = granted, scanning = granted && it.attempt == null) }
+    fun acceptDisclosure() {
+        _uiState.update { it.copy(disclosureAccepted = true) }
+    }
+
+    fun setCameraPermission(granted: Boolean, permanentlyDenied: Boolean = false) {
+        _uiState.update {
+            it.copy(
+                cameraPermissionGranted = granted,
+                cameraPermissionPermanentlyDenied = !granted && permanentlyDenied,
+                scanning = granted && it.disclosureAccepted && it.attempt == null && it.ocrReview == null,
+            )
+        }
     }
 
     fun resumeScanning() {
         graceJob?.cancel()
         autoNextJob?.cancel()
-        _uiState.update { it.copy(scanning = true, attempt = null, autoNextRemainingSeconds = 0, autoNextProgress = 0f) }
+        _uiState.update {
+            it.copy(
+                scanning = it.cameraPermissionGranted && it.disclosureAccepted,
+                scannerError = null,
+                ocrReview = null,
+                attempt = null,
+                autoNextRemainingSeconds = 0,
+                autoNextProgress = 0f,
+            )
+        }
     }
 
     fun acceptOcrText(text: String) {
-        val parsed = parser.parse(text)
-        val question = parsed.question ?: PracticeQuestion(
-            prompt = text,
-            options = listOf(PracticeOption("A", "Edit option"), PracticeOption("B", "Edit option")),
-        )
+        openOcrReview(OcrObservation(text))
+    }
+
+    fun openOcrReview(observation: OcrObservation) {
+        val draft = parser.parse(observation)
         _uiState.update {
             it.copy(
                 scanning = false,
-                attempt = PracticeAttemptState(question = question, createdAtMs = SystemMonotonicClock.nowMs()),
+                scannerError = null,
+                ocrReview = draft,
+                attempt = null,
             )
+        }
+    }
+
+    fun scannerFailed(message: String) {
+        _uiState.update { it.copy(scanning = false, scannerError = message) }
+    }
+
+    fun editOcrQuestion(question: String) {
+        updateOcrDraft { parser.validate(question, it.options, it.rawText) }
+    }
+
+    fun editOcrOptionLabel(index: Int, label: String) {
+        updateOcrDraft {
+            val options = it.options.toMutableList()
+            if (index !in options.indices) return@updateOcrDraft it
+            options[index] = options[index].copy(label = label)
+            parser.validate(it.question, options, it.rawText)
+        }
+    }
+
+    fun editOcrOptionText(index: Int, text: String) {
+        updateOcrDraft {
+            val options = it.options.toMutableList()
+            if (index !in options.indices) return@updateOcrDraft it
+            options[index] = options[index].copy(text = text)
+            parser.validate(it.question, options, it.rawText)
+        }
+    }
+
+    fun addOcrOption() {
+        updateOcrDraft {
+            if (it.options.size >= 8) return@updateOcrDraft it
+            val used = it.options.map { option -> option.label }.toSet()
+            val nextLabel = ('A'..'H').map(Char::toString).firstOrNull { label -> label !in used } ?: ""
+            parser.validate(it.question, it.options + OcrOptionDraft(nextLabel, ""), it.rawText)
+        }
+    }
+
+    fun removeOcrOption(index: Int) {
+        updateOcrDraft {
+            if (it.options.size <= 2 || index !in it.options.indices) return@updateOcrDraft it
+            parser.validate(it.question, it.options.filterIndexed { i, _ -> i != index }, it.rawText)
+        }
+    }
+
+    fun rejectOcr() {
+        _uiState.update { it.copy(scanning = false, ocrReview = null) }
+    }
+
+    fun confirmOcrDraft() {
+        val draft = _uiState.value.ocrReview ?: return
+        if (!draft.valid) return
+        _uiState.update {
+            it.copy(
+                scanning = false,
+                ocrReview = null,
+                attempt = PracticeAttemptState(question = draft.toPracticeQuestion(), createdAtMs = clock.nowMs()),
+            )
+        }
+    }
+
+    private fun updateOcrDraft(transform: (OcrDraft) -> OcrDraft) {
+        _uiState.update { state ->
+            val draft = state.ocrReview ?: return@update state
+            state.copy(ocrReview = transform(draft))
         }
     }
 

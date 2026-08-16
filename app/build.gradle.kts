@@ -138,8 +138,8 @@ dependencies {
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
     kapt(libs.room.compiler)
-    implementation(libs.work.runtime)
 
+    add("productionImplementation", libs.work.runtime)
     add("productionImplementation", libs.okhttp)
     add("productionImplementation", libs.gson)
     add("productionImplementation", platform(libs.firebase.bom))

@@ -1,9 +1,5 @@
 package app.practicelens.android.drive
 
-import android.content.Context
-import androidx.work.CoroutineWorker
-import androidx.work.WorkerParameters
-
 const val DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
 enum class DriveSyncState { DISCONNECTED, READY, USER_ACTION_REQUIRED, SYNCING, FAILED }
@@ -41,14 +37,4 @@ interface DriveBackupRepository {
 
 interface BackupScheduler {
     fun schedule(settings: DriveBackupSettings)
-}
-
-class DriveSyncWorker(
-    appContext: Context,
-    params: WorkerParameters,
-) : CoroutineWorker(appContext, params) {
-    override suspend fun doWork(): Result {
-        // This worker may upload already accepted local files. It intentionally has no camera dependency.
-        return Result.success()
-    }
 }
