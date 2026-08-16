@@ -1,16 +1,12 @@
-﻿# Copy this file to local.properties and fill in values appropriate for your environment.
-# Gradle ignores this file by default, but keep it out of version control if it contains secrets.
+# Copy to local.properties for local development. Do not commit local.properties.
 
-## Android SDK location
-sdk.dir=xxx
+sdk.dir=/path/to/android/sdk
 
-## AI API configuration
-api.url=https://api.openai.com/v1/chat/completions
-api.key=YOUR_API_KEY
-api.model=gpt-4
+# Optional model override.
+PRACTICELENS_GEMINI_MODEL_ID=gemini-3.6-flash
 
-## Release signing configuration
-signing.storeFile=../keystore/release.jks
-signing.storePassword=your_store_password
-signing.keyAlias=your_key_alias
-signing.keyPassword=your_key_password
+# Optional local production signing file path. Prefer GitHub Actions secrets for release.
+PRACTICELENS_KEYSTORE_FILE=keystore/release.jks
+PRACTICELENS_KEY_ALIAS=
+PRACTICELENS_STORE_PASSWORD=
+PRACTICELENS_KEY_PASSWORD=

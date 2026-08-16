@@ -1,7 +1,6 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Android 12+ 启动屏：纯白底，无图标（最小化系统启动屏） -->
-    <style name="Theme.AIAnswerer.Splash" parent="Theme.AIAnswerer">
-        <item name="android:windowSplashScreenBackground">#FFFFFF</item>
+    <style name="Theme.PracticeLens" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowSplashScreenBackground">#F7FAFC</item>
     </style>
 </resources>

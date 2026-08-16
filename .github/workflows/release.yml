@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - run: python3 tools/structural_guard.py
+      - name: Restore signing keystore
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/practicelens"
+          printf '%s' "$PRACTICELENS_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/practicelens/release.jks"
+          echo "PRACTICELENS_KEYSTORE_FILE=$RUNNER_TEMP/practicelens/release.jks" >> "$GITHUB_ENV"
+        env:
+          PRACTICELENS_KEYSTORE_B64: ${{ secrets.PRACTICELENS_KEYSTORE_B64 }}
+      - name: Inject Firebase config
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GOOGLE_SERVICES_JSON_B64" | base64 --decode > app/google-services.json
+        env:
+          GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
+      - run: ./gradlew testProductionReleaseUnitTest lintProductionRelease bundleProductionRelease assembleProductionRelease
+        env:
+          PRACTICELENS_KEY_ALIAS: ${{ secrets.PRACTICELENS_KEY_ALIAS }}
+          PRACTICELENS_STORE_PASSWORD: ${{ secrets.PRACTICELENS_STORE_PASSWORD }}
+          PRACTICELENS_KEY_PASSWORD: ${{ secrets.PRACTICELENS_KEY_PASSWORD }}
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          cp app/build/outputs/apk/production/release/*.apk "release/PracticeLens-v${VERSION}-production.apk"
+          cp app/build/outputs/bundle/productionRelease/*.aab "release/PracticeLens-v${VERSION}.aab"
+          cp docs/release-notes/PracticeLens-v${VERSION}-release-notes.md "release/PracticeLens-v${VERSION}-release-notes.md"
+          apksigner verify --verbose --print-certs "release/PracticeLens-v${VERSION}-production.apk" > "release/PracticeLens-v${VERSION}-signing-certificate.txt"
+          python3 tools/validate_release.py --tag "$GITHUB_REF_NAME" --apk "release/PracticeLens-v${VERSION}-production.apk" --notes "release/PracticeLens-v${VERSION}-release-notes.md"
+      - name: Firebase App Distribution
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_ANDROID_APP_ID }}
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+          groups: ${{ secrets.FIREBASE_TESTER_GROUPS }}
+          file: release/PracticeLens-${{ github.ref_name }}-production.apk
+          releaseNotesFile: release/PracticeLens-${{ github.ref_name }}-release-notes.md
+      - name: Cleanup secrets
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/practicelens/release.jks" app/google-services.json

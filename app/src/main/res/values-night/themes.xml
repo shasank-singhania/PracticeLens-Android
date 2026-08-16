@@ -1,7 +1,6 @@
 <resources>
-    <!-- Base application theme. -->
-    <style name="Base.Theme.AIAnswerer" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your dark theme here. -->
-        <!-- <item name="colorPrimary">@color/my_dark_primary</item> -->
+    <style name="Theme.PracticeLens" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#74A7C4</item>
     </style>
 </resources>
