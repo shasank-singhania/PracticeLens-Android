@@ -20,6 +20,11 @@ out/
 # Gradle files
 .gradle/
 build/
+.toolchains/
+.android-sdk/
+.android-user-home/
+.gradle-user-home/
+hs_err_pid*.log
 
 # Local configuration file (sdk path, etc)
 local.properties

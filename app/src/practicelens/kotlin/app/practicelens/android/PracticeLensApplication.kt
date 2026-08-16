@@ -1,13 +1,11 @@
 package app.practicelens.android
 
 import android.app.Application
-import com.google.firebase.FirebaseApp
 
 class PracticeLensApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        if (!BuildConfig.DEMO_EVALUATOR) {
-            FirebaseApp.initializeApp(this)
-        }
+        // Demo builds are fully offline. Production Firebase/App Check initialization will
+        // be added with the production Firebase configuration work.
     }
 }

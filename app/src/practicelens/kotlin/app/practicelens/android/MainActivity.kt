@@ -194,6 +194,7 @@ private fun AttemptScreen(state: PracticeLensUiState, viewModel: PracticeLensVie
                 val result = attempt.result
                 Text("Correct option: ${result?.correctOptionId}")
                 Text(result?.explanation.orEmpty())
+                result?.warning?.let { Text(it) }
                 Text("AI-generated feedback can be wrong. Verify important material with your course resources.")
                 LinearProgressIndicator(progress = { state.autoNextProgress }, modifier = Modifier.fillMaxWidth())
                 Text("Auto-next in ${state.autoNextRemainingSeconds}s")

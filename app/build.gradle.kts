@@ -83,6 +83,12 @@ android {
         getByName("test") {
             java.srcDirs("src/practicelensTest/kotlin")
         }
+        getByName("demo") {
+            java.srcDirs("src/demo/kotlin")
+        }
+        getByName("production") {
+            java.srcDirs("src/production/kotlin")
+        }
     }
 
     compileOptions {
@@ -93,6 +99,12 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    testOptions {
+        unitTests.all {
+            it.maxParallelForks = 1
+            it.maxHeapSize = "256m"
+        }
     }
     packaging {
         resources.excludes += setOf("META-INF/LICENSE*", "META-INF/AL2.0", "META-INF/LGPL2.1")
@@ -128,13 +140,12 @@ dependencies {
     kapt(libs.room.compiler)
     implementation(libs.work.runtime)
 
-    implementation(libs.okhttp)
-    implementation(libs.gson)
-    implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.ai)
-    implementation(libs.firebase.appcheck.playintegrity)
-    debugImplementation(libs.firebase.appcheck.debug)
-    implementation(libs.play.services.auth)
+    add("productionImplementation", libs.okhttp)
+    add("productionImplementation", libs.gson)
+    add("productionImplementation", platform(libs.firebase.bom))
+    add("productionImplementation", libs.firebase.ai)
+    add("productionImplementation", libs.firebase.appcheck.playintegrity)
+    add("productionImplementation", libs.play.services.auth)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)

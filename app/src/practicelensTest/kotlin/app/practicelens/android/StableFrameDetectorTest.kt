@@ -17,7 +17,7 @@ class StableFrameDetectorTest {
         val detector = StableFrameDetector(minStableDurationMs = 800, cooldownMs = 0)
         assertFalse(detector.observe(frame(0, text = "Q\nA. a\nB. b")).accepted)
         assertFalse(detector.observe(frame(400, text = "Q\nA. a\nB. b")).accepted)
-        assertTrue(detector.observe(frame(900, text = "Q\nA. a\nB. b")).accepted)
+        assertTrue(detector.observe(frame(800, text = "Q\nA. a\nB. b")).accepted)
         assertFalse(detector.observe(frame(1800, text = "Q\nA. a\nB. b")).accepted)
     }
 
