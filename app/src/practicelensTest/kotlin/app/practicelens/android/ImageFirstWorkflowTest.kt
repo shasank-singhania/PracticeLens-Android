@@ -7,6 +7,8 @@ import app.practicelens.android.camera.NormalizedCropRect
 import app.practicelens.android.core.CapturedQuestionMedia
 import app.practicelens.android.core.MonotonicClock
 import app.practicelens.android.interpretation.InterpretationStatus
+import app.practicelens.android.interpretation.AutomaticAnswer
+import app.practicelens.android.interpretation.AutomaticAnswerStatus
 import app.practicelens.android.interpretation.QuestionImageInterpreter
 import app.practicelens.android.interpretation.QuestionInterpretation
 import app.practicelens.android.interpretation.InterpretedOption
@@ -275,6 +277,9 @@ class ImageFirstWorkflowTest {
     private object NeverInterpreter : QuestionImageInterpreter {
         override suspend fun interpret(image: CapturedQuestionMedia, optionalOcrText: String?): QuestionInterpretation =
             QuestionInterpretation(InterpretationStatus.RETAKE_REQUIRED, "", emptyList(), 0.0)
+
+        override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer =
+            AutomaticAnswer(AutomaticAnswerStatus.UNREADABLE, confidence = 0.0)
     }
 
     private class NonCooperativeInterpreter : QuestionImageInterpreter {
@@ -289,6 +294,9 @@ class ImageFirstWorkflowTest {
                 withContext(NonCancellable) { request.await() }
             }
         }
+
+        override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer =
+            AutomaticAnswer(AutomaticAnswerStatus.UNREADABLE, confidence = 0.0)
     }
 
     private fun viewModelRunTest(block: suspend TestScope.() -> Unit) {

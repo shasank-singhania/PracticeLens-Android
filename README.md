@@ -24,6 +24,8 @@ Default learner flow:
 - `demo`: deterministic fake evaluator and offline/manual question review, no Firebase configuration, no Gemini calls, Drive disabled. Suitable for public CI and demo APK releases.
 - `production`: Firebase AI Logic with App Check for confirmed-crop interpretation/evaluation, Google Identity authorization, Drive API backup, and production signing.
 
+The demo debug APK application ID is `app.practicelens.android.autopractice.debug`.
+
 State flow: `SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> QUESTION_REVIEW -> ANSWERING -> GRACE_PERIOD -> EVALUATING -> RESULT` or `FAILED`. OCR is draft assistance only; camera capture never depends on OCR/parser validity.
 
 ## Build
@@ -32,6 +34,13 @@ State flow: `SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> 
 ./gradlew testDemoDebugUnitTest
 ./gradlew lintDemoDebug
 ./gradlew assembleDemoDebug
+```
+
+Install and launch the demo debug APK on a connected device:
+
+```bash
+adb install -r app/build/outputs/apk/demo/debug/app-demo-debug.apk
+adb shell am start -n app.practicelens.android.autopractice.debug/app.practicelens.android.MainActivity
 ```
 
 Production release builds require protected signing and Firebase inputs. See `docs/RELEASE_SIGNING.md` and `docs/FIREBASE_SETUP.md`.

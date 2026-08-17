@@ -6,6 +6,14 @@ import org.junit.Test
 import java.io.File
 
 class FirebaseVariantStructureTest {
+    @Test fun `demo debug application id avoids the stale demo signing identity`() {
+        val build = repoFile("app/build.gradle.kts").readText()
+        assertTrue(build.contains("applicationId = \"app.practicelens.android\""))
+        assertTrue(build.contains("applicationIdSuffix = \".autopractice\""))
+        assertFalse(build.contains("applicationIdSuffix = \".demo\""))
+        assertTrue(build.contains("applicationIdSuffix = \".debug\""))
+    }
+
     @Test fun `google services plugin is conditional on app config file`() {
         val build = repoFile("app/build.gradle.kts").readText()
         val rootBuild = repoFile("build.gradle.kts").readText()

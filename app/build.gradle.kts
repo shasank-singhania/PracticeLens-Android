@@ -49,7 +49,7 @@ android {
     productFlavors {
         create("demo") {
             dimension = "distribution"
-            applicationIdSuffix = ".demo"
+            applicationIdSuffix = ".autopractice"
             versionNameSuffix = "-demo"
             buildConfigField("Boolean", "DEMO_EVALUATOR", "true")
             buildConfigField("Boolean", "DRIVE_ENABLED", "false")

@@ -1,9 +1,7 @@
 package app.practicelens.android.camera
 
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.graphics.Rect
-import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
@@ -24,7 +22,6 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import app.practicelens.android.core.CapturedQuestionMedia
-import app.practicelens.android.core.sha256
 import app.practicelens.android.ocr.OcrObservation
 import app.practicelens.android.ocr.OcrTextBlock
 import app.practicelens.android.ocr.OcrTextElement
@@ -46,10 +43,12 @@ class CameraScannerController(
     private val onCaptured: (CapturedQuestionMedia) -> Unit,
     private val onError: (String) -> Unit,
     private val onStatus: (String) -> Unit = {},
+    private val onReady: () -> Unit = {},
     private val autoCaptureEnabled: Boolean = false,
 ) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val recognizer = MlKitImageCaptureOcrEngine()
+    private val imagePreparer = AndroidQuestionImagePreparer(context)
     private val stateMachine = ScannerStateMachine(clock = { SystemClock.elapsedRealtime() })
     private var provider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
@@ -117,6 +116,7 @@ class CameraScannerController(
                 configureTouchGestures()
                 logCameraInfo("bound")
                 reportStatus("Frame the full question and tap Capture question.")
+                ContextCompat.getMainExecutor(context).execute { onReady() }
                 if (autoCaptureEnabled) scheduleTimeout()
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera scanner failed to start", t)
@@ -194,6 +194,7 @@ class CameraScannerController(
             return
         }
         stateMachine.capturing()
+        previewView.display?.rotation?.let { capture.targetRotation = it }
         val outputFile = createCaptureFile()
         val requestGeneration = captureGeneration.incrementAndGet()
         val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
@@ -207,22 +208,10 @@ class CameraScannerController(
                             outputFile.delete()
                             return
                         }
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-                        val bytes = outputFile.readBytes()
-                        val media = CapturedQuestionMedia(
-                            uri = Uri.fromFile(outputFile).toString(),
-                            mimeType = "image/jpeg",
-                            width = bounds.outWidth,
-                            height = bounds.outHeight,
-                            appliedRotationDegrees = 0,
-                            sha256 = sha256(bytes),
-                            capturedAtMs = System.currentTimeMillis(),
-                            qualityWarnings = listOfNotNull(warning),
-                        )
+                        val media = imagePreparer.prepare(outputFile, warning)
                         stateMachine.reviewReady()
                         ContextCompat.getMainExecutor(context).execute {
-                            stop()
+                            if (manual) stop()
                             onCaptured(media)
                         }
                     } catch (t: Throwable) {

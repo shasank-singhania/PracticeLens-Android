@@ -63,4 +63,15 @@ public final class FirebaseAiSchemas {
         List<String> required = Arrays.asList("correctOptionId", "explanation", "confidence", "uncertain");
         return Schema.obj(root, required);
     }
+
+    public static Schema automaticAnswerSchema() {
+        Map<String, Schema> root = new LinkedHashMap<>();
+        root.put("status", Schema.enumeration(Arrays.asList("ANSWERED", "UNREADABLE", "NO_SINGLE_MCQ", "UNSUPPORTED")));
+        root.put("questionSummary", Schema.str("Concise summary of the dominant visible MCQ.", false));
+        root.put("answerLabel", Schema.str("Visible answer label such as A or 1, if present.", false));
+        root.put("answerText", Schema.str("Answer choice text. Required when ANSWERED.", false));
+        root.put("explanation", Schema.str("Optional concise learner-facing explanation.", false));
+        root.put("confidence", Schema.numDouble("Confidence from 0.0 to 1.0.", false, "double", 0.0, 1.0));
+        return Schema.obj(root, Arrays.asList("status", "confidence"));
+    }
 }

@@ -10,6 +10,7 @@ import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.delay
 
 enum class InterpretationStatus { READY, RETAKE_REQUIRED, NOT_MCQ }
+enum class AutomaticAnswerStatus { ANSWERED, UNREADABLE, NO_SINGLE_MCQ, UNSUPPORTED }
 
 enum class PracticeLensError {
     OFFLINE,
@@ -38,8 +39,18 @@ data class QuestionInterpretation(
         OcrParser().validate(questionText, options.map { OcrOptionDraft(it.displayLabel, it.text) }, rawText)
 }
 
+data class AutomaticAnswer(
+    val status: AutomaticAnswerStatus,
+    val questionSummary: String? = null,
+    val answerLabel: String? = null,
+    val answerText: String? = null,
+    val explanation: String? = null,
+    val confidence: Double,
+)
+
 interface QuestionImageInterpreter {
     suspend fun interpret(image: CapturedQuestionMedia, optionalOcrText: String?): QuestionInterpretation
+    suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer
 }
 
 class DemoQuestionImageInterpreter : QuestionImageInterpreter {
@@ -51,6 +62,18 @@ class DemoQuestionImageInterpreter : QuestionImageInterpreter {
             options = emptyList(),
             confidence = 0.0,
             retakeReason = "Demo builds stay offline. Edit the OCR draft manually or use a production build configured for Firebase AI image analysis.",
+        )
+    }
+
+    override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer {
+        delay(80)
+        return AutomaticAnswer(
+            status = AutomaticAnswerStatus.ANSWERED,
+            questionSummary = "Simulated demo MCQ from the visible camera image.",
+            answerLabel = "B",
+            answerText = "Simulated answer choice",
+            explanation = if (includeExplanation) "Demo builds are network-free; this deterministic answer exercises the automatic loop without Firebase/Gemini." else null,
+            confidence = 0.62,
         )
     }
 }
@@ -112,5 +135,48 @@ object QuestionInterpretationValidator {
         val position: Int,
         val displayLabel: String?,
         val text: String?,
+    )
+}
+
+object AutomaticAnswerValidator {
+    private val gson = Gson()
+    private const val MaxText = 1_200
+
+    fun parseJson(json: String): AutomaticAnswer {
+        val dto = try {
+            gson.fromJson(json.take(64_000), AutomaticAnswerDto::class.java)
+        } catch (e: JsonSyntaxException) {
+            throw ModelResponseException(PracticeLensError.INVALID_MODEL_RESPONSE, "Malformed automatic answer JSON.")
+        } ?: throw ModelResponseException(PracticeLensError.INVALID_MODEL_RESPONSE, "Blank automatic answer JSON.")
+        val status = runCatching { AutomaticAnswerStatus.valueOf(dto.status.orEmpty()) }.getOrNull()
+            ?: throw ModelResponseException(PracticeLensError.INVALID_MODEL_RESPONSE, "Unknown automatic answer status.")
+        val confidence = dto.confidence
+        if (!confidence.isFinite() || confidence !in 0.0..1.0) {
+            throw ModelResponseException(PracticeLensError.INVALID_MODEL_RESPONSE, "Invalid automatic answer confidence.")
+        }
+        val answerText = dto.answerText.clean()
+        if (status == AutomaticAnswerStatus.ANSWERED && answerText.isNullOrBlank()) {
+            throw ModelResponseException(PracticeLensError.INVALID_MODEL_RESPONSE, "ANSWERED result needs answerText.")
+        }
+        return AutomaticAnswer(
+            status = status,
+            questionSummary = dto.questionSummary.clean(),
+            answerLabel = dto.answerLabel.clean(32),
+            answerText = answerText,
+            explanation = dto.explanation.clean(),
+            confidence = confidence,
+        )
+    }
+
+    private fun String?.clean(limit: Int = MaxText): String? =
+        this?.trim()?.take(limit)?.takeIf(String::isNotBlank)
+
+    private data class AutomaticAnswerDto(
+        val status: String?,
+        val questionSummary: String?,
+        val answerLabel: String?,
+        val answerText: String?,
+        val explanation: String?,
+        val confidence: Double,
     )
 }

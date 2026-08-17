@@ -15,6 +15,8 @@ import app.practicelens.android.core.SystemMonotonicClock
 import app.practicelens.android.evaluation.GeminiEvaluator
 import app.practicelens.android.evaluation.EvaluatorFactory
 import app.practicelens.android.interpretation.InterpreterFactory
+import app.practicelens.android.interpretation.AutomaticAnswer
+import app.practicelens.android.interpretation.AutomaticAnswerStatus
 import app.practicelens.android.interpretation.InterpretationStatus
 import app.practicelens.android.interpretation.ModelResponseException
 import app.practicelens.android.interpretation.PracticeLensError
@@ -31,6 +33,22 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+enum class PracticeMode { AUTOMATIC_AI_PRACTICE, MANUAL_CAPTURE, MANUAL_CROP_REVIEW }
+enum class AutomaticPracticeState {
+    IDLE,
+    CAMERA_STARTING,
+    WAITING_FOR_FOCUS,
+    CAPTURING,
+    PREPARING_IMAGE,
+    ANALYZING,
+    SHOWING_RESULT,
+    WAITING_FOR_SCENE_CHANGE,
+    PAUSED,
+    STOPPED,
+    RECOVERABLE_ERROR,
+}
+enum class CaptureOrientation { AUTO, PORTRAIT, LANDSCAPE }
 
 data class PracticeLensUiState(
     val disclosureAccepted: Boolean = false,
@@ -52,6 +70,17 @@ data class PracticeLensUiState(
     val autoNextSeconds: Int = 5,
     val autoNextRemainingSeconds: Int = 0,
     val autoNextProgress: Float = 0f,
+    val practiceMode: PracticeMode = PracticeMode.AUTOMATIC_AI_PRACTICE,
+    val resultDisplaySeconds: Int = 5,
+    val captureOrientation: CaptureOrientation = CaptureOrientation.AUTO,
+    val includeExplanation: Boolean = true,
+    val automaticallyContinue: Boolean = true,
+    val automaticState: AutomaticPracticeState = AutomaticPracticeState.IDLE,
+    val automaticStatus: String = "Ready",
+    val automaticResult: AutomaticAnswer? = null,
+    val automaticCaptureRequestId: Long = 0,
+    val automaticRequestCount: Int = 0,
+    val automaticRequestCeiling: Int = 30,
 )
 
 class PracticeLensViewModel(
@@ -66,7 +95,14 @@ class PracticeLensViewModel(
     private var interpretationJob: Job? = null
     private var evaluationJob: Job? = null
     private var cropOcrJob: Job? = null
+    private var automaticJob: Job? = null
     private var captureGeneration: Long = 0
+    private var automaticSessionGeneration: Long = 0
+    private var lastSubmittedDHash: String? = null
+    private var lastAnsweredDHash: String? = null
+    private var consecutiveChangedScenes: Int = 0
+    private var lastModelRequestAtMs: Long = Long.MIN_VALUE
+    private var automaticSingleFlight = false
     private val interpretedFingerprints = mutableSetOf<String>()
     private val _uiState = MutableStateFlow(PracticeLensUiState())
     val uiState: StateFlow<PracticeLensUiState> = _uiState
@@ -109,6 +145,9 @@ class PracticeLensViewModel(
                 attempt = null,
                 autoNextRemainingSeconds = 0,
                 autoNextProgress = 0f,
+                automaticState = AutomaticPracticeState.IDLE,
+                automaticStatus = "Ready",
+                automaticResult = null,
             )
         }
     }
@@ -134,6 +173,289 @@ class PracticeLensViewModel(
                 interpretationError = null,
                 interpretationMessage = null,
                 attempt = null,
+            )
+        }
+    }
+
+    fun setPracticeMode(mode: PracticeMode) {
+        stopAutomaticPractice()
+        _uiState.update { it.copy(practiceMode = mode) }
+    }
+
+    fun setResultDisplaySeconds(seconds: Int) {
+        if (seconds in setOf(3, 5, 8, 10)) _uiState.update { it.copy(resultDisplaySeconds = seconds) }
+    }
+
+    fun setCaptureOrientation(orientation: CaptureOrientation) {
+        _uiState.update { it.copy(captureOrientation = orientation) }
+    }
+
+    fun setIncludeExplanation(include: Boolean) {
+        _uiState.update { it.copy(includeExplanation = include) }
+    }
+
+    fun setAutomaticallyContinue(enabled: Boolean) {
+        _uiState.update { it.copy(automaticallyContinue = enabled) }
+    }
+
+    fun setAutomaticRequestCeiling(limit: Int) {
+        if (limit in 1..100) _uiState.update { it.copy(automaticRequestCeiling = limit) }
+    }
+
+    fun startAutomaticPractice() {
+        val state = _uiState.value
+        if (!state.cameraPermissionGranted || !state.disclosureAccepted) return
+        if (state.automaticState !in setOf(AutomaticPracticeState.IDLE, AutomaticPracticeState.STOPPED, AutomaticPracticeState.RECOVERABLE_ERROR)) return
+        automaticJob?.cancel()
+        automaticSessionGeneration++
+        automaticSingleFlight = false
+        lastSubmittedDHash = null
+        lastAnsweredDHash = null
+        consecutiveChangedScenes = 0
+        lastModelRequestAtMs = clock.nowMs() - 8_000L
+        val session = automaticSessionGeneration
+        _uiState.update {
+            it.copy(
+                practiceMode = PracticeMode.AUTOMATIC_AI_PRACTICE,
+                scanning = true,
+                scannerError = null,
+                automaticState = AutomaticPracticeState.CAMERA_STARTING,
+                automaticStatus = "Starting camera",
+                automaticResult = null,
+                automaticRequestCount = 0,
+            )
+        }
+        automaticJob = viewModelScope.launch {
+            try {
+                kotlinx.coroutines.awaitCancellation()
+            } catch (e: CancellationException) {
+                if (session == automaticSessionGeneration) automaticSingleFlight = false
+                throw e
+            }
+        }
+    }
+
+    fun automaticCameraReady() {
+        val state = _uiState.value
+        if (state.automaticState != AutomaticPracticeState.CAMERA_STARTING || automaticSingleFlight) return
+        requestAutomaticCapture("Focusing")
+    }
+
+    fun pauseAutomaticPractice() {
+        if (_uiState.value.automaticState !in setOf(
+                AutomaticPracticeState.CAPTURING,
+                AutomaticPracticeState.PREPARING_IMAGE,
+                AutomaticPracticeState.ANALYZING,
+                AutomaticPracticeState.SHOWING_RESULT,
+                AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE,
+                AutomaticPracticeState.WAITING_FOR_FOCUS,
+            )
+        ) return
+        automaticJob?.cancel()
+        automaticSessionGeneration++
+        automaticSingleFlight = false
+        _uiState.update { it.copy(automaticState = AutomaticPracticeState.PAUSED, automaticStatus = "Paused") }
+    }
+
+    fun resumeAutomaticPractice() {
+        if (_uiState.value.automaticState != AutomaticPracticeState.PAUSED) return
+        automaticSessionGeneration++
+        automaticJob = viewModelScope.launch { kotlinx.coroutines.awaitCancellation() }
+        requestAutomaticCapture("Focusing")
+    }
+
+    fun stopAutomaticPractice() {
+        automaticJob?.cancel()
+        automaticJob = null
+        automaticSessionGeneration++
+        automaticSingleFlight = false
+        retireActiveMedia()
+        _uiState.update {
+            it.copy(
+                scanning = false,
+                automaticState = AutomaticPracticeState.STOPPED,
+                automaticStatus = "Stopped",
+                automaticCaptureRequestId = it.automaticCaptureRequestId + 1,
+            )
+        }
+    }
+
+    fun onAutomaticImageCaptured(media: CapturedQuestionMedia) {
+        val session = automaticSessionGeneration
+        val state = _uiState.value
+        if (state.automaticState !in setOf(AutomaticPracticeState.CAPTURING, AutomaticPracticeState.WAITING_FOR_FOCUS)) {
+            QuestionMediaJanitor.delete(media)
+            return
+        }
+        val hash = media.perceptualHash()
+        automaticSingleFlight = false
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.PREPARING_IMAGE,
+                automaticStatus = "Preparing image",
+                capturedImage = media,
+            )
+        }
+        if (state.automaticRequestCount >= state.automaticRequestCeiling) {
+            QuestionMediaJanitor.delete(media)
+            stopWithLocalAutomaticMessage("Session request limit reached.")
+            return
+        }
+        val answeredDistance = app.practicelens.android.camera.QuestionImagePreparationCore.hammingDistance(hash, lastAnsweredDHash)
+        if (lastAnsweredDHash != null && answeredDistance <= 10) {
+            QuestionMediaJanitor.delete(media)
+            scheduleNextCandidate(session, "Waiting for next question")
+            return
+        }
+        if (lastAnsweredDHash != null && consecutiveChangedScenes < 1) {
+            consecutiveChangedScenes++
+            QuestionMediaJanitor.delete(media)
+            scheduleNextCandidate(session, "Confirming scene change")
+            return
+        }
+        consecutiveChangedScenes = 0
+        analyzeAutomaticImage(session, media, hash)
+    }
+
+    fun automaticCaptureFailed(message: String) {
+        automaticSingleFlight = false
+        _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = message) }
+        scheduleNextCandidate(automaticSessionGeneration, "Recovering")
+    }
+
+    fun analyzeManualFullImage(media: CapturedQuestionMedia) {
+        interpretationJob?.cancel()
+        _uiState.update {
+            it.copy(
+                scanning = false,
+                capturedImage = media,
+                automaticState = AutomaticPracticeState.ANALYZING,
+                automaticStatus = "Analyzing",
+                automaticResult = null,
+            )
+        }
+        interpretationJob = viewModelScope.launch {
+            try {
+                val result = interpreter.answerFromImage(media, _uiState.value.includeExplanation)
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.SHOWING_RESULT,
+                        automaticStatus = if (result.status == AutomaticAnswerStatus.ANSWERED) "Answer" else result.status.name,
+                        automaticResult = result,
+                    )
+                }
+            } catch (e: CancellationException) {
+                QuestionMediaJanitor.delete(media)
+                throw e
+            } catch (e: ModelResponseException) {
+                _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = e.message ?: "Image analysis failed.") }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = e.message ?: "Image analysis failed.") }
+            }
+        }
+    }
+
+    private fun requestAutomaticCapture(status: String) {
+        if (automaticSingleFlight) return
+        automaticSingleFlight = true
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.CAPTURING,
+                automaticStatus = status,
+                automaticCaptureRequestId = it.automaticCaptureRequestId + 1,
+            )
+        }
+    }
+
+    private fun analyzeAutomaticImage(session: Long, media: CapturedQuestionMedia, hash: String?) {
+        lastSubmittedDHash = hash
+        automaticJob?.cancel()
+        automaticJob = viewModelScope.launch {
+            try {
+                val waitMs = (8_000L - (clock.nowMs() - lastModelRequestAtMs)).coerceAtLeast(0L)
+                if (waitMs > 0) delay(waitMs)
+                if (session != automaticSessionGeneration) {
+                    QuestionMediaJanitor.delete(media)
+                    return@launch
+                }
+                lastModelRequestAtMs = clock.nowMs()
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.ANALYZING,
+                        automaticStatus = "Analyzing",
+                        automaticRequestCount = it.automaticRequestCount + 1,
+                    )
+                }
+                val result = interpreter.answerFromImage(media, _uiState.value.includeExplanation)
+                if (session != automaticSessionGeneration || hash != lastSubmittedDHash) {
+                    QuestionMediaJanitor.delete(media)
+                    return@launch
+                }
+                if (result.status == AutomaticAnswerStatus.ANSWERED) lastAnsweredDHash = hash
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.SHOWING_RESULT,
+                        automaticStatus = if (result.status == AutomaticAnswerStatus.ANSWERED) "Answer" else result.status.name,
+                        automaticResult = result,
+                    )
+                }
+                delay(_uiState.value.resultDisplaySeconds * 1_000L)
+                QuestionMediaJanitor.delete(media)
+                if (session == automaticSessionGeneration && _uiState.value.automaticallyContinue) {
+                    scheduleNextCandidate(session, "Waiting for next question")
+                }
+            } catch (e: CancellationException) {
+                QuestionMediaJanitor.delete(media)
+                throw e
+            } catch (e: ModelResponseException) {
+                QuestionMediaJanitor.delete(media)
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
+                        automaticStatus = e.message ?: "Recoverable model error",
+                    )
+                }
+                scheduleNextCandidate(session, "Recovering")
+            } catch (e: Exception) {
+                QuestionMediaJanitor.delete(media)
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
+                        automaticStatus = e.message ?: "Recoverable error",
+                    )
+                }
+                scheduleNextCandidate(session, "Recovering")
+            }
+        }
+    }
+
+    private fun scheduleNextCandidate(session: Long, status: String) {
+        automaticJob?.cancel()
+        automaticJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    automaticState = AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE,
+                    automaticStatus = status,
+                    automaticResult = if (status.startsWith("Waiting")) it.automaticResult else null,
+                )
+            }
+            delay(1_500)
+            if (session == automaticSessionGeneration && _uiState.value.automaticState == AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE) {
+                requestAutomaticCapture("Checking scene")
+            }
+        }
+    }
+
+    private fun stopWithLocalAutomaticMessage(message: String) {
+        automaticJob?.cancel()
+        automaticJob = null
+        automaticSessionGeneration++
+        automaticSingleFlight = false
+        _uiState.update {
+            it.copy(
+                scanning = false,
+                automaticState = AutomaticPracticeState.STOPPED,
+                automaticStatus = message,
             )
         }
     }
@@ -481,11 +803,13 @@ class PracticeLensViewModel(
         interpretationJob?.cancel()
         evaluationJob?.cancel()
         cancelActiveCropOcr()
+        stopAutomaticPractice()
         stopAutoNext()
         _uiState.update { it.copy(scanning = false, cropOcrLoading = false) }
     }
 
     override fun onCleared() {
+        stopAutomaticPractice()
         cancelActiveCropOcr()
         retireActiveMedia()
         super.onCleared()
@@ -539,4 +863,7 @@ class PracticeLensViewModel(
             ),
         )
     }
+
+    private fun CapturedQuestionMedia.perceptualHash(): String? =
+        qualityWarnings.firstOrNull { it.startsWith("dhash:") }?.removePrefix("dhash:")
 }

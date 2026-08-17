@@ -29,6 +29,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -126,23 +127,45 @@ fun PracticeLensApp(
             when {
                 !state.disclosureAccepted -> DisclosureScreen {
                     viewModel.acceptDisclosure()
-                    if (state.cameraPermissionGranted) viewModel.resumeScanning() else onRequestCamera()
+                    if (state.cameraPermissionGranted) viewModel.startAutomaticPractice() else onRequestCamera()
                 }
                 !state.cameraPermissionGranted -> CameraPermissionScreen(
                     permanentlyDenied = state.cameraPermissionPermanentlyDenied,
                     onRetry = onRequestCamera,
                     onOpenSettings = onOpenSettings,
                 )
-                capturedImage != null && state.croppedImage == null -> CropReviewScreen(capturedImage, viewModel)
+                state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE &&
+                    state.automaticState != AutomaticPracticeState.IDLE &&
+                    state.automaticState != AutomaticPracticeState.STOPPED -> AutomaticPracticeScreen(state, viewModel)
+                state.practiceMode == PracticeMode.MANUAL_CAPTURE &&
+                    state.automaticState in setOf(AutomaticPracticeState.ANALYZING, AutomaticPracticeState.SHOWING_RESULT, AutomaticPracticeState.RECOVERABLE_ERROR) ->
+                    ManualAiResultScreen(state, viewModel)
+                capturedImage != null && state.croppedImage == null && state.practiceMode == PracticeMode.MANUAL_CROP_REVIEW -> CropReviewScreen(capturedImage, viewModel)
                 reviewDraft != null -> QuestionReviewScreen(state, reviewDraft, viewModel)
                 state.scanning -> CameraScanner(
-                    onCaptured = viewModel::openCropReview,
+                    automatic = false,
+                    onReady = {},
+                    captureRequestId = 0,
+                    onCaptured = if (state.practiceMode == PracticeMode.MANUAL_CAPTURE) viewModel::analyzeManualFullImage else viewModel::openCropReview,
                     onError = viewModel::scannerFailed,
                 )
                 state.attempt != null -> AttemptScreen(state, viewModel)
                 else -> WaitingScreen(
+                    state = state,
                     scannerError = state.scannerError,
-                    onScan = viewModel::resumeScanning,
+                    onMode = viewModel::setPracticeMode,
+                    onResultDuration = viewModel::setResultDisplaySeconds,
+                    onOrientation = viewModel::setCaptureOrientation,
+                    onIncludeExplanation = viewModel::setIncludeExplanation,
+                    onAutomaticallyContinue = viewModel::setAutomaticallyContinue,
+                    onRequestCeiling = viewModel::setAutomaticRequestCeiling,
+                    onScan = {
+                        when (state.practiceMode) {
+                            PracticeMode.AUTOMATIC_AI_PRACTICE -> viewModel.startAutomaticPractice()
+                            PracticeMode.MANUAL_CAPTURE,
+                            PracticeMode.MANUAL_CROP_REVIEW -> viewModel.resumeScanning()
+                        }
+                    },
                 )
             }
         }
@@ -178,17 +201,77 @@ private fun CameraPermissionScreen(
 }
 
 @Composable
-private fun WaitingScreen(scannerError: String?, onScan: () -> Unit) {
+private fun WaitingScreen(
+    state: PracticeLensUiState,
+    scannerError: String?,
+    onMode: (PracticeMode) -> Unit,
+    onResultDuration: (Int) -> Unit,
+    onOrientation: (CaptureOrientation) -> Unit,
+    onIncludeExplanation: (Boolean) -> Unit,
+    onAutomaticallyContinue: (Boolean) -> Unit,
+    onRequestCeiling: (Int) -> Unit,
+    onScan: () -> Unit,
+) {
     Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("PracticeLens", style = MaterialTheme.typography.headlineMedium)
-        Text("Waiting for a new question...")
+        Text("Mode")
+        PracticeMode.values().forEach { mode ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = state.practiceMode == mode, onClick = { onMode(mode) })
+                Text(
+                    when (mode) {
+                        PracticeMode.AUTOMATIC_AI_PRACTICE -> "Automatic AI Practice"
+                        PracticeMode.MANUAL_CAPTURE -> "Manual capture"
+                        PracticeMode.MANUAL_CROP_REVIEW -> "Manual crop and review"
+                    },
+                )
+            }
+        }
+        Text("Result display duration")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(3, 5, 8, 10).forEach { seconds ->
+                OutlinedButton(onClick = { onResultDuration(seconds) }, enabled = state.resultDisplaySeconds != seconds) {
+                    Text("${seconds}s")
+                }
+            }
+        }
+        Text("Capture orientation")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            CaptureOrientation.values().forEach { orientation ->
+                OutlinedButton(onClick = { onOrientation(orientation) }, enabled = state.captureOrientation != orientation) {
+                    Text(orientation.name.lowercase().replaceFirstChar { it.uppercase() })
+                }
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = state.includeExplanation, onCheckedChange = onIncludeExplanation)
+            Text("Include explanation")
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = state.automaticallyContinue, onCheckedChange = onAutomaticallyContinue)
+            Text("Automatically continue")
+        }
+        Text("Session request ceiling")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(10, 30, 60).forEach { limit ->
+                OutlinedButton(onClick = { onRequestCeiling(limit) }, enabled = state.automaticRequestCeiling != limit) {
+                    Text(limit.toString())
+                }
+            }
+        }
         scannerError?.let { Text(it) }
-        Button(onClick = onScan, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Open camera") }
+        state.automaticStatus.takeIf { state.automaticState == AutomaticPracticeState.STOPPED }?.let { Text(it) }
+        Button(onClick = onScan, modifier = Modifier.sizeIn(minHeight = 48.dp)) {
+            Text(if (state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE) "Start automatic practice" else "Open camera")
+        }
     }
 }
 
 @Composable
 private fun CameraScanner(
+    automatic: Boolean,
+    onReady: () -> Unit,
+    captureRequestId: Long,
     onCaptured: (CapturedQuestionMedia) -> Unit,
     onError: (String) -> Unit,
 ) {
@@ -206,6 +289,8 @@ private fun CameraScanner(
                         onCaptured = onCaptured,
                         onError = onError,
                         onStatus = { scannerStatus = it },
+                        onReady = { if (automatic) onReady() },
+                        autoCaptureEnabled = false,
                     )
                     controller.set(scannerController)
                     previewView.setTag(scannerController)
@@ -219,6 +304,13 @@ private fun CameraScanner(
                 controller.compareAndSet(releasedController, null)
             },
         )
+        LaunchedEffect(captureRequestId) {
+            if (automatic && captureRequestId > 0) {
+                if (controller.get()?.captureQuestion(manual = false) != true) {
+                    scannerStatus = "Capture is already running."
+                }
+            }
+        }
         Box(
             Modifier
                 .align(Alignment.Center)
@@ -227,7 +319,7 @@ private fun CameraScanner(
                 .border(2.dp, Color.White)
                 .semantics { contentDescription = "Question aiming guide" },
         )
-        Card(Modifier.align(Alignment.BottomCenter).padding(16.dp)) {
+        if (!automatic) Card(Modifier.align(Alignment.BottomCenter).padding(16.dp)) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Align one multiple-choice question inside the guide.")
                 Text("Tap the preview to focus. Pinch to zoom.")
@@ -242,6 +334,57 @@ private fun CameraScanner(
                 ) { Text("Capture question") }
             }
         }
+    }
+}
+
+@Composable
+private fun AutomaticPracticeScreen(state: PracticeLensUiState, viewModel: PracticeLensViewModel) {
+    Box(Modifier.fillMaxSize()) {
+        CameraScanner(
+            automatic = true,
+            onReady = viewModel::automaticCameraReady,
+            captureRequestId = state.automaticCaptureRequestId,
+            onCaptured = viewModel::onAutomaticImageCaptured,
+            onError = viewModel::automaticCaptureFailed,
+        )
+        Card(Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth()) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(state.automaticStatus, style = MaterialTheme.typography.titleMedium)
+                state.automaticResult?.let { AutomaticResultCard(it) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (state.automaticState == AutomaticPracticeState.PAUSED) {
+                        Button(onClick = viewModel::resumeAutomaticPractice, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Resume") }
+                    } else {
+                        OutlinedButton(onClick = viewModel::pauseAutomaticPractice, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Pause") }
+                    }
+                    Button(onClick = viewModel::stopAutomaticPractice, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Stop") }
+                }
+                Text("Requests ${state.automaticRequestCount}/${state.automaticRequestCeiling}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManualAiResultScreen(state: PracticeLensUiState, viewModel: PracticeLensViewModel) {
+    Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(state.automaticStatus, style = MaterialTheme.typography.titleLarge)
+        state.automaticResult?.let { AutomaticResultCard(it) }
+        Button(onClick = viewModel::retake, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Capture another") }
+    }
+}
+
+@Composable
+private fun AutomaticResultCard(result: app.practicelens.android.interpretation.AutomaticAnswer) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        result.questionSummary?.let { Text(it) }
+        if (result.status == app.practicelens.android.interpretation.AutomaticAnswerStatus.ANSWERED) {
+            Text("Answer: ${listOfNotNull(result.answerLabel, result.answerText).joinToString(" ")}")
+        } else {
+            Text(result.status.name)
+        }
+        result.explanation?.let { Text(it) }
+        Text("Confidence ${"%.0f".format(result.confidence * 100)}%")
     }
 }
 
