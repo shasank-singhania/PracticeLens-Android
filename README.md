@@ -11,17 +11,20 @@ PracticeLens uses only the in-app foreground rear camera. It does not declare or
 Default learner flow:
 
 1. Open PracticeLens and grant camera permission.
-2. Scan one visible multiple-choice question with the rear camera.
-3. Freeze the accepted frame and stop camera analysis.
-4. Run on-device OCR and let the learner correct the question/options.
-5. Let the learner choose and revise an answer.
-6. Evaluate only after the selected option remains unchanged through the grace period.
-7. Show correctness, explanation, warning text, history, and a stoppable auto-next countdown.
+2. Frame one visible multiple-choice question with the rear camera and tap `Capture question`.
+3. Freeze a private still image, stop camera analysis, and confirm the crop.
+4. Run on-device OCR on the confirmed crop and let the learner correct the question/options.
+5. Optionally analyze the confirmed crop with production Firebase AI image interpretation.
+6. Let the learner confirm the editable question, then choose and revise an answer.
+7. Evaluate only after the selected option remains unchanged through the grace period.
+8. Show correctness, explanation, warning text, history, and a stoppable auto-next countdown.
 
 ## Variants
 
-- `demo`: deterministic fake evaluator, no Firebase configuration, no Gemini calls, Drive disabled. Suitable for public CI and demo APK releases.
-- `production`: Firebase AI Logic with App Check, Google Identity authorization, Drive API backup, and production signing.
+- `demo`: deterministic fake evaluator and offline/manual question review, no Firebase configuration, no Gemini calls, Drive disabled. Suitable for public CI and demo APK releases.
+- `production`: Firebase AI Logic with App Check for confirmed-crop interpretation/evaluation, Google Identity authorization, Drive API backup, and production signing.
+
+State flow: `SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> QUESTION_REVIEW -> ANSWERING -> GRACE_PERIOD -> EVALUATING -> RESULT` or `FAILED`. OCR is draft assistance only; camera capture never depends on OCR/parser validity.
 
 ## Build
 

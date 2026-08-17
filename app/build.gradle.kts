@@ -9,6 +9,16 @@ plugins {
     alias(libs.plugins.kover)
 }
 
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
+tasks.matching {
+    it.name.startsWith("processDemo") && it.name.endsWith("GoogleServices")
+}.configureEach {
+    enabled = false
+}
+
 val versionProps = Properties().apply {
     rootProject.file("version.properties").inputStream().use(::load)
 }
@@ -89,6 +99,12 @@ android {
         getByName("production") {
             java.srcDirs("src/production/kotlin")
         }
+        maybeCreate("productionDebug").apply {
+            java.srcDirs("src/productionDebug/kotlin")
+        }
+        maybeCreate("productionRelease").apply {
+            java.srcDirs("src/productionRelease/kotlin")
+        }
     }
 
     compileOptions {
@@ -134,6 +150,7 @@ dependencies {
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
     implementation(libs.mlkit.text.recognition)
+    implementation(libs.gson)
 
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
@@ -141,11 +158,11 @@ dependencies {
 
     add("productionImplementation", libs.work.runtime)
     add("productionImplementation", libs.okhttp)
-    add("productionImplementation", libs.gson)
     add("productionImplementation", platform(libs.firebase.bom))
     add("productionImplementation", libs.firebase.ai)
-    add("productionImplementation", libs.firebase.appcheck.playintegrity)
     add("productionImplementation", libs.play.services.auth)
+    add("productionDebugImplementation", libs.firebase.appcheck.debug)
+    add("productionReleaseImplementation", libs.firebase.appcheck.playintegrity)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)

@@ -1,7 +1,9 @@
 package app.practicelens.android.camera
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.graphics.Rect
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
@@ -14,14 +16,16 @@ import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import app.practicelens.android.core.CapturedQuestionMedia
+import app.practicelens.android.core.sha256
 import app.practicelens.android.ocr.OcrObservation
-import app.practicelens.android.ocr.OcrParser
 import app.practicelens.android.ocr.OcrTextBlock
 import app.practicelens.android.ocr.OcrTextElement
 import app.practicelens.android.ocr.OcrTextLine
@@ -29,6 +33,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.TimeUnit
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -37,13 +42,12 @@ class CameraScannerController(
     private val context: Context,
     private val lifecycleOwner: LifecycleOwner,
     private val previewView: PreviewView,
-    private val onAccepted: (OcrObservation) -> Unit,
+    private val onCaptured: (CapturedQuestionMedia) -> Unit,
     private val onError: (String) -> Unit,
     private val onStatus: (String) -> Unit = {},
 ) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val recognizer = MlKitImageCaptureOcrEngine()
-    private val parser = OcrParser()
     private val stateMachine = ScannerStateMachine(clock = { SystemClock.elapsedRealtime() })
     private var provider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
@@ -94,13 +98,13 @@ class CameraScannerController(
                     frameAnalyzer.analyze(ImageProxyFrame(image))
                 }
                 cameraProvider.unbindAll()
-                camera = cameraProvider.bindToLifecycle(
-                    lifecycleOwner,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview,
-                    imageAnalysis,
-                    capture,
-                )
+                val useCaseGroup = UseCaseGroup.Builder()
+                    .addUseCase(preview)
+                    .addUseCase(imageAnalysis)
+                    .addUseCase(capture)
+                    .also { builder -> previewView.viewPort?.let(builder::setViewPort) }
+                    .build()
+                camera = cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup)
                 configureTouchGestures()
                 logCameraInfo("bound")
                 scheduleTimeout()
@@ -179,52 +183,55 @@ class CameraScannerController(
             return
         }
         stateMachine.capturing()
+        val outputFile = createCaptureFile()
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
         capture.takePicture(
+            outputOptions,
             executor,
-            object : ImageCapture.OnImageCapturedCallback() {
-                override fun onCaptureSuccess(image: ImageProxy) {
-                    val startMs = SystemClock.elapsedRealtime()
-                    stateMachine.recognizing()
-                    Log.i(
-                        TAG,
-                        "capture resolution=${image.width}x${image.height}, rotation=${image.imageInfo.rotationDegrees}, manual=$manual",
-                    )
-                    recognizer.recognize(CapturedImageFrame(image)) { result ->
-                        try {
-                            val observation = result.getOrElse {
-                                stateMachine.fail()
-                                reportError("OCR failed. Retake with the full question in view.")
-                                return@recognize
-                            }
-                            val elapsed = SystemClock.elapsedRealtime() - startMs
-                            val draft = parser.parse(observation)
-                            Log.i(
-                                TAG,
-                                "ocr durationMs=$elapsed blocks=${observation.blocks.size} lines=${observation.lines.size} " +
-                                    "elements=${observation.lines.sumOf { it.elements.size }} options=${draft.options.size} " +
-                                    "confidence=${"%.2f".format(draft.confidence)} reason=${if (draft.valid) "parsed" else draft.message.take(80)} " +
-                                    "preview=${observation.fullText.replace('\n', ' ').take(160)}",
-                            )
-                            stateMachine.reviewReady()
-                            ContextCompat.getMainExecutor(context).execute {
-                                stop()
-                                onAccepted(observation)
-                            }
-                        } finally {
-                            image.close()
-                            captureRunning.set(false)
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
+                    try {
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
+                        val bytes = outputFile.readBytes()
+                        val media = CapturedQuestionMedia(
+                            uri = Uri.fromFile(outputFile).toString(),
+                            mimeType = "image/jpeg",
+                            width = bounds.outWidth,
+                            height = bounds.outHeight,
+                            appliedRotationDegrees = 0,
+                            sha256 = sha256(bytes),
+                            capturedAtMs = System.currentTimeMillis(),
+                            qualityWarnings = listOfNotNull(warning),
+                        )
+                        stateMachine.reviewReady()
+                        ContextCompat.getMainExecutor(context).execute {
+                            stop()
+                            onCaptured(media)
                         }
+                    } catch (t: Throwable) {
+                        outputFile.delete()
+                        stateMachine.fail()
+                        reportError("Capture failed. Hold steady and try again.")
+                    } finally {
+                        captureRunning.set(false)
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
                     Log.w(TAG, "Image capture failed", exception)
+                    outputFile.delete()
                     captureRunning.set(false)
                     stateMachine.fail()
                     reportError("Capture failed. Hold steady and try again.")
                 }
             },
         )
+    }
+
+    private fun createCaptureFile(): File {
+        val dir = File(context.cacheDir, "question-captures").apply { mkdirs() }
+        return File(dir, "capture-${System.currentTimeMillis()}-${SystemClock.elapsedRealtimeNanos()}.jpg")
     }
 
     private fun configureTouchGestures() {

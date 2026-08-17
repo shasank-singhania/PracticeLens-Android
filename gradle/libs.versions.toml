@@ -16,6 +16,7 @@ gson = "2.11.0"
 firebaseBom = "34.16.0"
 playServicesAuth = "21.5.1"
 kover = "0.8.3"
+googleServices = "4.4.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -57,3 +58,4 @@ kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
 kover = { id = "org.jetbrains.kotlinx.kover", version.ref = "kover" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

@@ -8,11 +8,24 @@ enum class EvaluationState { NOT_STARTED, GRACE_PERIOD, IN_FLIGHT, COMPLETE, FAI
 
 data class PracticeOption(val id: String, val text: String)
 
+data class CapturedQuestionMedia(
+    val uri: String,
+    val mimeType: String,
+    val width: Int,
+    val height: Int,
+    val appliedRotationDegrees: Int,
+    val sha256: String,
+    val capturedAtMs: Long,
+    val qualityWarnings: List<String> = emptyList(),
+)
+
 data class PracticeQuestion(
     val id: String = UUID.randomUUID().toString(),
     val prompt: String,
     val options: List<PracticeOption>,
-    val sourceFingerprint: String = fingerprint(prompt + options.joinToString { it.id + it.text }),
+    val media: CapturedQuestionMedia? = null,
+    val ocrText: String? = null,
+    val sourceFingerprint: String = questionSourceFingerprint(media?.sha256, prompt, options),
 )
 
 data class LockedAttempt(
@@ -101,6 +114,14 @@ class PracticeReducer(private val clock: MonotonicClock) {
     fun fail(state: PracticeAttemptState): PracticeAttemptState =
         state.copy(evaluationState = EvaluationState.FAILED)
 
+    fun cancelEvaluation(state: PracticeAttemptState): PracticeAttemptState =
+        state.copy(
+            evaluationState = EvaluationState.GRACE_PERIOD,
+            finalLockAtMs = null,
+            lockedAttempt = null,
+            result = null,
+        )
+
     fun markQuestionable(state: PracticeAttemptState): PracticeAttemptState =
         state.copy(questionableFeedback = true)
 
@@ -118,3 +139,17 @@ fun fingerprint(text: String): String {
     val digest = MessageDigest.getInstance("SHA-256").digest(text.trim().lowercase().toByteArray())
     return digest.joinToString("") { "%02x".format(it) }
 }
+
+fun sha256(bytes: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+    return digest.joinToString("") { "%02x".format(it) }
+}
+
+fun questionSourceFingerprint(imageSha256: String?, prompt: String, options: List<PracticeOption>): String =
+    fingerprint(
+        listOf(
+            imageSha256.orEmpty(),
+            prompt,
+            options.joinToString("\n") { "${it.id}:${it.text}" },
+        ).joinToString("\n"),
+    )

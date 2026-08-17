@@ -3,6 +3,7 @@ package app.practicelens.android
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -11,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -46,18 +48,26 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.net.toFile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import app.practicelens.android.camera.AndroidCropOcrProcessor
+import app.practicelens.android.camera.AndroidQuestionMediaProcessor
 import app.practicelens.android.camera.CameraScannerController
+import app.practicelens.android.camera.CropReviewGeometry
+import app.practicelens.android.core.CapturedQuestionMedia
 import app.practicelens.android.core.EvaluationState
+import app.practicelens.android.core.QuestionMediaJanitor
 import app.practicelens.android.ocr.OcrDraft
-import app.practicelens.android.ocr.OcrObservation
 import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : ComponentActivity() {
@@ -96,6 +106,12 @@ fun PracticeLensApp(
 ) {
     val state by viewModel.uiState.collectAsState()
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
+    DisposableEffect(context) {
+        val processor = AndroidQuestionMediaProcessor(context)
+        QuestionMediaJanitor.install(processor::delete)
+        onDispose { QuestionMediaJanitor.clear() }
+    }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) viewModel.onBackgrounded()
@@ -106,6 +122,7 @@ fun PracticeLensApp(
     MaterialTheme {
         Surface(Modifier.fillMaxSize()) {
             val reviewDraft = state.ocrReview
+            val capturedImage = state.capturedImage
             when {
                 !state.disclosureAccepted -> DisclosureScreen {
                     viewModel.acceptDisclosure()
@@ -116,9 +133,10 @@ fun PracticeLensApp(
                     onRetry = onRequestCamera,
                     onOpenSettings = onOpenSettings,
                 )
-                reviewDraft != null -> OcrReviewScreen(reviewDraft, viewModel)
+                capturedImage != null && state.croppedImage == null -> CropReviewScreen(capturedImage, viewModel)
+                reviewDraft != null -> QuestionReviewScreen(state, reviewDraft, viewModel)
                 state.scanning -> CameraScanner(
-                    onAccepted = viewModel::openOcrReview,
+                    onCaptured = viewModel::openCropReview,
                     onError = viewModel::scannerFailed,
                 )
                 state.attempt != null -> AttemptScreen(state, viewModel)
@@ -171,12 +189,12 @@ private fun WaitingScreen(scannerError: String?, onScan: () -> Unit) {
 
 @Composable
 private fun CameraScanner(
-    onAccepted: (OcrObservation) -> Unit,
+    onCaptured: (CapturedQuestionMedia) -> Unit,
     onError: (String) -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val controller = remember { AtomicReference<CameraScannerController?>(null) }
-    var scannerStatus by remember { mutableStateOf("Reading question — hold steady.") }
+    var scannerStatus by remember { mutableStateOf("Frame the question, then capture.") }
     Box(Modifier.fillMaxSize()) {
         AndroidView(
             factory = { ctx ->
@@ -185,7 +203,7 @@ private fun CameraScanner(
                         context = ctx,
                         lifecycleOwner = lifecycleOwner,
                         previewView = previewView,
-                        onAccepted = onAccepted,
+                        onCaptured = onCaptured,
                         onError = onError,
                         onStatus = { scannerStatus = it },
                     )
@@ -228,14 +246,79 @@ private fun CameraScanner(
 }
 
 @Composable
-private fun OcrReviewScreen(draft: OcrDraft, viewModel: PracticeLensViewModel) {
+private fun CropReviewScreen(media: CapturedQuestionMedia, viewModel: PracticeLensViewModel) {
+    val context = LocalContext.current
+    val state by viewModel.uiState.collectAsState()
+    val processor = remember { AndroidCropOcrProcessor(context) }
+    var crop by remember(media.sha256) { mutableStateOf(CropReviewGeometry.initialGuide()) }
+    var rotation by remember(media.sha256) { mutableStateOf(0) }
+    val bitmap = remember(media.uri) { BitmapFactory.decodeFile(Uri.parse(media.uri).toFile().absolutePath)?.asImageBitmap() }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Confirm crop", style = MaterialTheme.typography.titleLarge)
+        bitmap?.let {
+            Image(
+                bitmap = it,
+                contentDescription = "Captured question image",
+                modifier = Modifier.fillMaxWidth().height(320.dp).border(1.dp, Color.Gray),
+                contentScale = ContentScale.Fit,
+            )
+        }
+        Text("Crop ${"%.0f".format((crop.right - crop.left) * 100)}% x ${"%.0f".format((crop.bottom - crop.top) * 100)}%, rotation $rotation degrees.")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { crop = CropReviewGeometry.move(crop, -0.03f, 0f) }) { Text("Left") }
+            OutlinedButton(onClick = { crop = CropReviewGeometry.move(crop, 0.03f, 0f) }) { Text("Right") }
+            OutlinedButton(onClick = { crop = CropReviewGeometry.move(crop, 0f, -0.03f) }) { Text("Up") }
+            OutlinedButton(onClick = { crop = CropReviewGeometry.move(crop, 0f, 0.03f) }) { Text("Down") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { crop = CropReviewGeometry.resize(crop, left = -0.03f, top = -0.03f, right = 0.03f, bottom = 0.03f) }) { Text("Larger") }
+            OutlinedButton(onClick = { crop = CropReviewGeometry.resize(crop, left = 0.03f, top = 0.03f, right = -0.03f, bottom = -0.03f) }) { Text("Smaller") }
+            OutlinedButton(onClick = { rotation = (rotation + 270) % 360 }) { Text("Rotate left") }
+            OutlinedButton(onClick = { rotation = (rotation + 90) % 360 }) { Text("Rotate right") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = { crop = CropReviewGeometry.initialGuide(); rotation = 0 }) { Text("Reset crop") }
+            OutlinedButton(onClick = { crop = CropReviewGeometry.fullImage() }) { Text("Use full image") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = {
+                processor.delete(media)
+                viewModel.retake()
+            }) { Text("Retake") }
+            Button(
+                onClick = {
+                    viewModel.startCropOcr(media, crop, rotation, processor)
+                },
+                enabled = !state.cropOcrLoading,
+            ) { Text(if (state.cropOcrLoading) "Processing..." else "Confirm crop") }
+        }
+        media.qualityWarnings.forEach { Text(it) }
+    }
+    DisposableEffect(Unit) { onDispose { processor.close() } }
+}
+
+@Composable
+private fun QuestionReviewScreen(state: PracticeLensUiState, draft: OcrDraft, viewModel: PracticeLensViewModel) {
     val scroll = rememberScrollState()
     var showRaw by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Review OCR", style = MaterialTheme.typography.titleLarge)
+        Text("Review question", style = MaterialTheme.typography.titleLarge)
+        state.croppedImage?.let { media ->
+            val bitmap = remember(media.uri) { BitmapFactory.decodeFile(Uri.parse(media.uri).toFile().absolutePath)?.asImageBitmap() }
+            bitmap?.let {
+                Image(
+                    bitmap = it,
+                    contentDescription = "Confirmed crop",
+                    modifier = Modifier.fillMaxWidth().height(180.dp).border(1.dp, Color.Gray),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+        }
         Text("Detected options: ${draft.options.size}; confidence: ${"%.0f".format(draft.confidence * 100)}%")
         if (!draft.valid) Text(draft.message)
         draft.warnings.forEach { Text(it) }
+        if (state.interpretationLoading) Text("Analyzing confirmed crop with AI...")
+        state.interpretationMessage?.let { Text(it) }
         OutlinedTextField(
             value = draft.question,
             onValueChange = viewModel::editOcrQuestion,
@@ -292,6 +375,11 @@ private fun OcrReviewScreen(draft: OcrDraft, viewModel: PracticeLensViewModel) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = viewModel::retake, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Retake") }
+            OutlinedButton(
+                onClick = viewModel::analyzeImageWithAi,
+                enabled = state.croppedImage != null && !state.interpretationLoading,
+                modifier = Modifier.sizeIn(minHeight = 48.dp),
+            ) { Text("Analyze image with AI") }
             Button(
                 onClick = viewModel::confirmOcrDraft,
                 enabled = draft.valid,
@@ -347,7 +435,11 @@ private fun AttemptScreen(state: PracticeLensUiState, viewModel: PracticeLensVie
                 }
                 Button(onClick = viewModel::practiceAgainLater, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Practice again later") }
             }
-            EvaluationState.FAILED -> Button(onClick = viewModel::retryEvaluation, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Retry evaluation") }
+            EvaluationState.FAILED -> {
+                state.evaluationError?.let { Text("Evaluation error: $it") }
+                state.evaluationMessage?.let { Text(it) }
+                Button(onClick = viewModel::retryEvaluation, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Retry evaluation") }
+            }
             else -> Text("Select an answer when ready.")
         }
         Spacer(Modifier.height(24.dp))

@@ -2,6 +2,7 @@ package app.practicelens.android.ocr
 
 import app.practicelens.android.core.PracticeOption
 import app.practicelens.android.core.PracticeQuestion
+import app.practicelens.android.core.CapturedQuestionMedia
 
 data class OcrTextLine(
     val text: String,
@@ -61,11 +62,13 @@ data class OcrDraft(
     val warnings: List<String> = emptyList(),
     val lineCount: Int = rawText.lines().count { it.isNotBlank() },
 ) {
-    fun toPracticeQuestion(): PracticeQuestion {
+    fun toPracticeQuestion(media: CapturedQuestionMedia? = null): PracticeQuestion {
         require(valid) { message }
         return PracticeQuestion(
             prompt = question.trim(),
-            options = options.map { PracticeOption(it.label.trim().uppercase(), it.text.trim()) },
+            options = options.mapIndexed { index, option -> PracticeOption("option-$index", option.text.trim()) },
+            media = media,
+            ocrText = rawText.takeIf(String::isNotBlank),
         )
     }
 }

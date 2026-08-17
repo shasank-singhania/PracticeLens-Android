@@ -181,7 +181,13 @@ class OcrMcqExtractor(
             val nextLabelIndex = labels.getOrNull(labelPosition + 1)?.index ?: lines.size
             quizCardCandidate(lines, indexedLabel.index, nextLabelIndex, observation)
         }
-        val best = candidates.maxByOrNull { it.score }?.takeIf { it.score >= 0.58 } ?: return null
+        val best = candidates
+            .maxWithOrNull(
+                compareBy<QuizCardCandidate> { !it.hadFeedback }
+                    .thenBy { it.optionGroups.size }
+                    .thenBy { it.score },
+            )
+            ?: return null
         val selected = mutableListOf<OcrTextLine>()
         selected += best.promptLines
         best.optionGroups.forEachIndexed { index, group ->
@@ -219,6 +225,12 @@ class OcrMcqExtractor(
         if (content.size < 3) return null
         val contentRightOfLabel = content.filter { (_, line) -> !positioned(line) || line.left >= label.right - 32 }
         if (contentRightOfLabel.size < 3) return null
+        val cueIndex = contentRightOfLabel.indexOfLast { (_, line) -> line.text.contains('?') || questionNumberPattern.matches(line.text) }
+        if (cueIndex >= 0 && cueIndex < contentRightOfLabel.lastIndex) {
+            val prompt = contentRightOfLabel.take(cueIndex + 1).map { it.second }.filterNot { questionLabelPattern.matches(it.text) }
+            val groups = radioOptionGroups(contentRightOfLabel.drop(cueIndex + 1).map { it.second })
+            quizCardCandidateFromGroups(label, prompt, groups, feedbackStart, observation, lines)?.let { return it }
+        }
 
         val starts = (1 until contentRightOfLabel.size).mapNotNull { start ->
             val prompt = contentRightOfLabel.take(start).map { it.second }.filterNot { questionLabelPattern.matches(it.text) }
@@ -226,34 +238,48 @@ class OcrMcqExtractor(
             val groups = radioOptionGroups(optionLines)
             if (prompt.isEmpty() || groups.size < 2) return@mapNotNull null
             val promptCue = prompt.any { it.text.contains('?') || questionNumberPattern.matches(it.text) }
-            val optionFirstLines = groups.map { it.first() }
-            val optionLefts = optionFirstLines.map { it.left }
-            val leftSpread = (optionLefts.maxOrNull() ?: 0) - (optionLefts.minOrNull() ?: 0)
-            val optionSpacingScore = if (leftSpread <= 56) 0.20 else 0.08
-            val cueScore = if (promptCue) 0.22 else 0.08
-            val countScore = when (groups.size) {
-                2 -> 0.14
-                3, 4, 5 -> 0.22
-                else -> 0.10
-            }
-            val regionLines = listOf(label) + prompt + groups.flatten()
-            val bounds = bounds(regionLines) ?: return@mapNotNull null
-            val imageHeight = observation.height.takeIf { it > 0 } ?: lines.maxOfOrNull { it.bottom }?.coerceAtLeast(1) ?: 1
-            val imageWidth = observation.width.takeIf { it > 0 } ?: lines.maxOfOrNull { it.right }?.coerceAtLeast(1) ?: 1
-            val compactHeightScore = (1.0 - bounds.height.toDouble() / imageHeight.toDouble()).coerceIn(0.0, 0.16)
-            val compactWidthScore = if (bounds.width <= imageWidth * 0.82) 0.12 else 0.04
-            val centerDistance = abs(bounds.centerY - imageHeight / 2).toDouble() / maxOf(imageHeight / 2, 1)
-            val centerScore = (0.10 * (1.0 - centerDistance)).coerceIn(0.0, 0.10)
-            val feedbackPenalty = if (feedbackStart >= 0) 0.14 else 0.0
-            QuizCardCandidate(
-                promptLines = prompt,
-                optionGroups = groups.take(8),
-                score = cueScore + countScore + optionSpacingScore + compactHeightScore + compactWidthScore + centerScore - feedbackPenalty,
-                region = OcrQuestionRegion(bounds.left, bounds.top, bounds.right, bounds.bottom, regionLines.size, "quiz-card-radio-layout"),
-                hadFeedback = feedbackStart >= 0,
-            )
+            if (!promptCue) return@mapNotNull null
+            quizCardCandidateFromGroups(label, prompt, groups, feedbackStart, observation, lines)
         }
-        return starts.maxByOrNull { it.score }
+        return starts
+            .maxWithOrNull(compareBy<QuizCardCandidate> { it.optionGroups.size }.thenBy { it.score })
+            ?: starts.maxByOrNull { it.score }
+    }
+
+    private fun quizCardCandidateFromGroups(
+        label: OcrTextLine,
+        prompt: List<OcrTextLine>,
+        groups: List<List<OcrTextLine>>,
+        feedbackStart: Int,
+        observation: OcrObservation,
+        lines: List<OcrTextLine>,
+    ): QuizCardCandidate? {
+        if (prompt.isEmpty() || groups.size < 2) return null
+        val optionFirstLines = groups.map { it.first() }
+        val optionLefts = optionFirstLines.map { it.left }
+        val leftSpread = (optionLefts.maxOrNull() ?: 0) - (optionLefts.minOrNull() ?: 0)
+        val optionSpacingScore = if (leftSpread <= 56) 0.20 else 0.08
+        val countScore = when (groups.size) {
+            2 -> 0.14
+            3, 4, 5 -> 0.22
+            else -> 0.10
+        }
+        val regionLines = listOf(label) + prompt + groups.flatten()
+        val bounds = bounds(regionLines) ?: return null
+        val imageHeight = observation.height.takeIf { it > 0 } ?: lines.maxOfOrNull { it.bottom }?.coerceAtLeast(1) ?: 1
+        val imageWidth = observation.width.takeIf { it > 0 } ?: lines.maxOfOrNull { it.right }?.coerceAtLeast(1) ?: 1
+        val compactHeightScore = (1.0 - bounds.height.toDouble() / imageHeight.toDouble()).coerceIn(0.0, 0.16)
+        val compactWidthScore = if (bounds.width <= imageWidth * 0.82) 0.12 else 0.04
+        val centerDistance = abs(bounds.centerY - imageHeight / 2).toDouble() / maxOf(imageHeight / 2, 1)
+        val centerScore = (0.10 * (1.0 - centerDistance)).coerceIn(0.0, 0.10)
+        val feedbackPenalty = if (feedbackStart >= 0) 0.35 else 0.0
+        return QuizCardCandidate(
+            promptLines = prompt,
+            optionGroups = groups.take(8),
+            score = 0.22 + countScore + optionSpacingScore + compactHeightScore + compactWidthScore + centerScore - feedbackPenalty,
+            region = OcrQuestionRegion(bounds.left, bounds.top, bounds.right, bounds.bottom, regionLines.size, "quiz-card-radio-layout"),
+            hadFeedback = feedbackStart >= 0,
+        )
     }
 
     private fun radioOptionGroups(optionLines: List<OcrTextLine>): List<List<OcrTextLine>> {
@@ -267,7 +293,7 @@ class OcrMcqExtractor(
             val lineHeight = maxOf(line.bottom - line.top, previous?.let { it.bottom - it.top } ?: 1, 1)
             val gap = if (previous != null && positioned(previous) && positioned(line)) line.top - previous.bottom else Int.MAX_VALUE
             val sameColumn = previous == null || !positioned(previous) || !positioned(line) || abs(line.left - previous.left) <= 48
-            val wrapsPrevious = previous != null && sameColumn && gap >= -lineHeight && gap <= maxOf(30, (lineHeight * 1.45).toInt())
+            val wrapsPrevious = previous != null && sameColumn && gap >= -lineHeight && gap <= 4
             if (wrapsPrevious) {
                 groups.last() += line
             } else {
