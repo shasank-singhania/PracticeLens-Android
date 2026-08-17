@@ -15,4 +15,10 @@ object QuestionMediaJanitor {
         media ?: return
         runCatching { deleter(media) }
     }
+
+    fun deleteAll(media: Iterable<CapturedQuestionMedia?>) {
+        media.filterNotNull()
+            .distinctBy { it.uri }
+            .forEach(::delete)
+    }
 }

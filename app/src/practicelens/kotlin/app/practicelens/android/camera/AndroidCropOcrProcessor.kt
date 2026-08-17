@@ -20,9 +20,11 @@ class AndroidCropOcrProcessor(context: Context) : CropOcrProcessor {
         return try {
             val observation = recognize(cropped)
             CropOcrResult(cropped, observation)
-        } catch (t: Throwable) {
+        } catch (e: kotlinx.coroutines.CancellationException) {
             mediaProcessor.delete(cropped)
-            throw t
+            throw e
+        } catch (t: Throwable) {
+            CropOcrResult(cropped, null)
         }
     }
 
@@ -41,7 +43,7 @@ class AndroidCropOcrProcessor(context: Context) : CropOcrProcessor {
                 if (!continuation.isActive) {
                     mediaProcessor.delete(media)
                 } else {
-                    continuation.resume(result.getOrNull())
+                    continuation.resume(result.getOrThrow())
                 }
             }
         }

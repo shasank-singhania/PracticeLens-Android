@@ -36,3 +36,14 @@ Required device/emulator coverage before release:
 - stoppable five-second auto-next
 - local history across update
 - explicit Drive consent and backup
+# Local Real-Image OCR Regression
+
+Real captured question images must stay local and uncommitted. Put developer-only fixtures in `local-ocr-fixtures/`; this directory is gitignored. Optional OCR sidecars can be added beside each image as `<image-name>.jpg.ocr.txt`.
+
+Run:
+
+```powershell
+python tools\real_image_regression.py
+```
+
+The report is written to `real-image-regression-reports/latest.json`, also gitignored. By default it records fixture ID, file name, dimensions, OCR character count from the optional sidecar, parser validity, detected option count, processing latency, rejection category, and whether manual review remains reachable. It does not upload images or log complete question text. For local debugging only, add `--include-ocr-text`.

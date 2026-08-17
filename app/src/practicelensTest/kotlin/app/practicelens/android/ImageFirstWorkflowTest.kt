@@ -139,6 +139,44 @@ class ImageFirstWorkflowTest {
         assertTrue(processor.deleted.isEmpty())
     }
 
+    @Test fun `confirmed crop still reaches review when OCR returns no observation`() = viewModelRunTest {
+        val processor = ControlledCropOcrProcessor()
+        val vm = PracticeLensViewModel(FakeClock, NeverInterpreter)
+        val capture = media("capture")
+        val crop = media("crop")
+
+        vm.openCropReview(capture)
+        vm.startCropOcr(capture, CropReviewGeometry.initialGuide(), 0, processor)
+        runCurrent()
+        processor.requests.single().response.complete(CropOcrResult(crop, null))
+        runCurrent()
+
+        assertFalse(vm.uiState.value.scanning)
+        assertEquals(crop.sha256, vm.uiState.value.croppedImage?.sha256)
+        assertFalse(vm.uiState.value.ocrReview?.valid ?: true)
+        assertTrue(vm.uiState.value.ocrReview?.rawText?.isBlank() == true)
+    }
+
+    @Test fun `duplicate crop confirmations produce one active crop result`() = viewModelRunTest {
+        val processor = NonCooperativeCropOcrProcessor()
+        val vm = PracticeLensViewModel(FakeClock, NeverInterpreter)
+        val capture = media("capture")
+        val staleCrop = media("stale-crop")
+        val activeCrop = media("active-crop")
+
+        vm.openCropReview(capture)
+        vm.startCropOcr(capture, CropReviewGeometry.initialGuide(), 0, processor)
+        runCurrent()
+        vm.startCropOcr(capture, CropReviewGeometry.fullImage(), 0, processor)
+        runCurrent()
+        processor.requests[1].response.complete(CropOcrResult(activeCrop, OcrObservation("New?\nA. One\nB. Two")))
+        processor.requests[0].response.complete(CropOcrResult(staleCrop, OcrObservation("Old?\nA. One\nB. Two")))
+        runCurrent()
+
+        assertEquals(activeCrop.sha256, vm.uiState.value.croppedImage?.sha256)
+        assertEquals(listOf(staleCrop.sha256), processor.deleted.map { it.sha256 })
+    }
+
     @Test fun `backgrounding cancels pending crop OCR work`() = viewModelRunTest {
         val processor = ControlledCropOcrProcessor()
         val vm = PracticeLensViewModel(FakeClock, NeverInterpreter)

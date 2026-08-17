@@ -37,6 +37,7 @@ import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class CameraScannerController(
     private val context: Context,
@@ -45,6 +46,7 @@ class CameraScannerController(
     private val onCaptured: (CapturedQuestionMedia) -> Unit,
     private val onError: (String) -> Unit,
     private val onStatus: (String) -> Unit = {},
+    private val autoCaptureEnabled: Boolean = false,
 ) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val recognizer = MlKitImageCaptureOcrEngine()
@@ -56,6 +58,7 @@ class CameraScannerController(
     private var camera: androidx.camera.core.Camera? = null
     private val stopped = AtomicBoolean(false)
     private val captureRunning = AtomicBoolean(false)
+    private val captureGeneration = AtomicLong(0)
     private val resolutionSelector = ResolutionSelector.Builder()
         .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
         .build()
@@ -70,44 +73,51 @@ class CameraScannerController(
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(resolutionSelector)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
+                val imageAnalysis = if (autoCaptureEnabled) {
+                    ImageAnalysis.Builder()
+                        .setResolutionSelector(resolutionSelector)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                } else {
+                    null
+                }
                 val capture = ImageCapture.Builder()
                     .setResolutionSelector(resolutionSelector)
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                     .build()
                 val rotation = previewView.display?.rotation ?: 0
-                imageAnalysis.targetRotation = rotation
+                imageAnalysis?.targetRotation = rotation
                 capture.targetRotation = rotation
 
-                val frameAnalyzer = StableOcrFrameAnalyzer(
-                    metricsCalculator = ImageProxyMetricsCalculator(),
-                    detector = StableFrameDetector(),
-                    onStable = {
-                        reportStatus("Stable frame found. Focusing before capture.")
-                        captureQuestion(manual = false)
-                    },
-                    onRejected = { rejection -> reportRejection(rejection) },
-                )
+                val frameAnalyzer = imageAnalysis?.let {
+                    StableOcrFrameAnalyzer(
+                        metricsCalculator = ImageProxyMetricsCalculator(),
+                        detector = StableFrameDetector(),
+                        onStable = {
+                            reportStatus("Stable frame found. Focusing before capture.")
+                            captureQuestion(manual = false)
+                        },
+                        onRejected = { rejection -> reportRejection(rejection) },
+                    )
+                }
                 analyzer = frameAnalyzer
                 analysis = imageAnalysis
                 imageCapture = capture
-                imageAnalysis.setAnalyzer(executor) { image ->
-                    frameAnalyzer.analyze(ImageProxyFrame(image))
+                imageAnalysis?.setAnalyzer(executor) { image ->
+                    frameAnalyzer?.analyze(ImageProxyFrame(image)) ?: image.close()
                 }
                 cameraProvider.unbindAll()
                 val useCaseGroup = UseCaseGroup.Builder()
                     .addUseCase(preview)
-                    .addUseCase(imageAnalysis)
                     .addUseCase(capture)
+                    .also { builder -> imageAnalysis?.let(builder::addUseCase) }
                     .also { builder -> previewView.viewPort?.let(builder::setViewPort) }
                     .build()
                 camera = cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, useCaseGroup)
                 configureTouchGestures()
                 logCameraInfo("bound")
-                scheduleTimeout()
+                reportStatus("Frame the full question and tap Capture question.")
+                if (autoCaptureEnabled) scheduleTimeout()
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera scanner failed to start", t)
                 stop()
@@ -118,6 +128,7 @@ class CameraScannerController(
 
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        captureGeneration.incrementAndGet()
         analysis?.clearAnalyzer()
         analyzer?.dispose()
         provider?.unbindAll()
@@ -184,6 +195,7 @@ class CameraScannerController(
         }
         stateMachine.capturing()
         val outputFile = createCaptureFile()
+        val requestGeneration = captureGeneration.incrementAndGet()
         val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
         capture.takePicture(
             outputOptions,
@@ -191,6 +203,10 @@ class CameraScannerController(
             object : ImageCapture.OnImageSavedCallback {
                 override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
                     try {
+                        if (stopped.get() || requestGeneration != captureGeneration.get()) {
+                            outputFile.delete()
+                            return
+                        }
                         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                         BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
                         val bytes = outputFile.readBytes()

@@ -144,8 +144,9 @@ class PracticeLensViewModel(
         rotationDegrees: Int,
         processor: CropOcrProcessor,
     ) {
-        val requestGeneration = captureGeneration
         val sourceFingerprint = source.sha256
+        if (!_uiState.value.isActiveCropReview(sourceFingerprint, captureGeneration)) return
+        val requestGeneration = ++captureGeneration
         cropOcrJob?.cancel()
         _uiState.update { state ->
             if (!state.isActiveCropReview(sourceFingerprint, requestGeneration)) return@update state
@@ -530,8 +531,12 @@ class PracticeLensViewModel(
 
     private fun retireActiveMedia() {
         val state = _uiState.value
-        QuestionMediaJanitor.delete(state.capturedImage)
-        QuestionMediaJanitor.delete(state.croppedImage)
-        QuestionMediaJanitor.delete(state.attempt?.question?.media)
+        QuestionMediaJanitor.deleteAll(
+            listOf(
+                state.capturedImage,
+                state.croppedImage,
+                state.attempt?.question?.media,
+            ),
+        )
     }
 }

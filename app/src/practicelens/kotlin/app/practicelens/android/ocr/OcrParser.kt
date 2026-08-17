@@ -76,7 +76,8 @@ data class OcrDraft(
 class OcrParser {
     private val extractor = OcrMcqExtractor()
     private val labelPattern = Regex(
-        pattern = """^\s*(?:[\(\[]?\s*([A-Ha-h1-8])\s*[\)\].:\-]|([A-Ha-h1-8])\s*[\)\].:\-])\s*(.*)$""",
+        pattern = """^\s*(?:[\(\[]?\s*([A-H1-8]|I{1,3}|IV|V|VI{0,3})\s*[\)\].:\-]|([A-H1-8]|I{1,3}|IV|V|VI{0,3})\s*[\)\].:\-])\s*(.*)$""",
+        options = setOf(RegexOption.IGNORE_CASE),
     )
 
     fun parse(observation: OcrObservation): OcrDraft {
@@ -182,7 +183,7 @@ class OcrParser {
             val label = normalizeLabel(option.label)
             val labelError = when {
                 label.isBlank() -> "Label is required."
-                !label.matches(Regex("[A-H1-8]")) -> "Use A-H or 1-8."
+                !label.matches(Regex("[A-H1-8]|I{1,3}|IV|V|VI{0,3}")) -> "Use A-H, 1-8, or Roman numerals."
                 else -> null
             }
             val textError = if (option.text.trim().isBlank()) "Option text is required." else null

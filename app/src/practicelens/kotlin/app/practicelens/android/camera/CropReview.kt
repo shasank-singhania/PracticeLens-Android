@@ -31,8 +31,13 @@ object CropReviewGeometry {
         return NormalizedCropRect(left, top, left + width, top + height)
     }
 
-    fun move(rect: NormalizedCropRect, dx: Float, dy: Float): NormalizedCropRect =
-        clamp(rect.copy(left = rect.left + dx, top = rect.top + dy, right = rect.right + dx, bottom = rect.bottom + dy))
+    fun move(rect: NormalizedCropRect, dx: Float, dy: Float): NormalizedCropRect {
+        val width = rect.right - rect.left
+        val height = rect.bottom - rect.top
+        val left = (rect.left + dx).coerceIn(0f, 1f - width)
+        val top = (rect.top + dy).coerceIn(0f, 1f - height)
+        return clamp(NormalizedCropRect(left, top, left + width, top + height))
+    }
 
     fun resize(rect: NormalizedCropRect, left: Float = 0f, top: Float = 0f, right: Float = 0f, bottom: Float = 0f): NormalizedCropRect =
         clamp(

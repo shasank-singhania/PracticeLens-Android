@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Rect
 import android.net.Uri
 import androidx.core.net.toFile
+import app.practicelens.android.camera.ImageDecodePolicy
 import app.practicelens.android.core.CapturedQuestionMedia
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -13,7 +14,15 @@ class AndroidCropOcrReader {
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
     fun recognize(media: CapturedQuestionMedia, onComplete: (Result<OcrObservation>) -> Unit) {
-        val bitmap = BitmapFactory.decodeFile(Uri.parse(media.uri).toFile().absolutePath)
+        val path = Uri.parse(media.uri).toFile().absolutePath
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        val bitmap = BitmapFactory.decodeFile(
+            path,
+            BitmapFactory.Options().apply {
+                inSampleSize = ImageDecodePolicy.sampleSize(bounds.outWidth, bounds.outHeight)
+            },
+        )
         if (bitmap == null) {
             onComplete(Result.failure(IllegalStateException("Captured image is unavailable.")))
             return
