@@ -20,12 +20,21 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AutomaticPracticeWorkflowTest {
+    @Test fun `initial automatic state is configuring`() {
+        val vm = PracticeLensViewModel(TestClock, RecordingInterpreter())
+
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
+        assertFalse(vm.uiState.value.scanning)
+        assertEquals(0, vm.uiState.value.automaticCaptureRequestId)
+    }
+
     @Test fun `automatic mode is default`() {
         val vm = PracticeLensViewModel(TestClock, RecordingInterpreter())
 
@@ -35,13 +44,46 @@ class AutomaticPracticeWorkflowTest {
         assertTrue(vm.uiState.value.automaticallyContinue)
     }
 
-    @Test fun `start creates one automatic capture request`() = viewModelRunTest {
+    @Test fun `camera and capture do not start before start`() = viewModelRunTest {
+        val vm = readyVm()
+
+        vm.automaticCameraReady()
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
+        assertFalse(vm.uiState.value.scanning)
+        assertEquals(0, vm.uiState.value.automaticCaptureRequestId)
+    }
+
+    @Test fun `start creates one automatic capture request after readiness and focus delay`() = viewModelRunTest {
         val vm = readyVm()
 
         vm.startAutomaticPractice()
         vm.startAutomaticPractice()
         vm.automaticCameraReady()
         vm.automaticCameraReady()
+
+        assertEquals(AutomaticPracticeState.WAITING_FOR_FOCUS, vm.uiState.value.automaticState)
+        assertEquals(0, vm.uiState.value.automaticCaptureRequestId)
+
+        advanceTimeBy(700)
+        runCurrent()
+
+        assertEquals(AutomaticPracticeState.CAPTURING, vm.uiState.value.automaticState)
+        assertEquals(1, vm.uiState.value.automaticCaptureRequestId)
+    }
+
+    @Test fun `recomposition style repeated readiness events do not duplicate capture`() = viewModelRunTest {
+        val vm = readyVm()
+
+        vm.startAutomaticPractice()
+        repeat(8) { vm.automaticCameraReady() }
+        advanceTimeBy(700)
+        runCurrent()
+        repeat(8) { vm.automaticCameraReady() }
+        advanceTimeBy(2_000)
+        runCurrent()
 
         assertEquals(AutomaticPracticeState.CAPTURING, vm.uiState.value.automaticState)
         assertEquals(1, vm.uiState.value.automaticCaptureRequestId)
@@ -53,6 +95,8 @@ class AutomaticPracticeWorkflowTest {
         vm.setResultDisplaySeconds(3)
         vm.startAutomaticPractice()
         vm.automaticCameraReady()
+        advanceTimeBy(700)
+        runCurrent()
 
         vm.onAutomaticImageCaptured(media("one", "0000000000000000"))
         runCurrent()
@@ -70,6 +114,8 @@ class AutomaticPracticeWorkflowTest {
         vm.setResultDisplaySeconds(3)
         vm.startAutomaticPractice()
         vm.automaticCameraReady()
+        advanceTimeBy(700)
+        runCurrent()
         vm.onAutomaticImageCaptured(media("one", "0000000000000000"))
         runCurrent()
         advanceTimeBy(4_500)
@@ -88,6 +134,8 @@ class AutomaticPracticeWorkflowTest {
         vm.setResultDisplaySeconds(3)
         vm.startAutomaticPractice()
         vm.automaticCameraReady()
+        advanceTimeBy(700)
+        runCurrent()
         vm.onAutomaticImageCaptured(media("one", "0000000000000000"))
         runCurrent()
         advanceTimeBy(4_500)
@@ -104,6 +152,39 @@ class AutomaticPracticeWorkflowTest {
         assertEquals(2, interpreter.answerCalls)
     }
 
+    @Test fun `result delay and scene change automatically request next captures`() = viewModelRunTest {
+        val interpreter = RecordingInterpreter()
+        val vm = readyVm(interpreter)
+        vm.setResultDisplaySeconds(3)
+        vm.startAutomaticPractice()
+        vm.automaticCameraReady()
+        advanceTimeBy(700)
+        runCurrent()
+
+        vm.onAutomaticImageCaptured(media("one", "0000000000000000"))
+        runCurrent()
+        assertEquals(1, vm.uiState.value.automaticCaptureRequestId)
+
+        advanceTimeBy(3_000)
+        runCurrent()
+        assertEquals(AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE, vm.uiState.value.automaticState)
+        advanceTimeBy(1_500)
+        runCurrent()
+        assertEquals(AutomaticPracticeState.CAPTURING, vm.uiState.value.automaticState)
+        assertEquals(2, vm.uiState.value.automaticCaptureRequestId)
+
+        vm.onAutomaticImageCaptured(media("changed-a", "ffffffffffffffff"))
+        runCurrent()
+        advanceTimeBy(1_500)
+        runCurrent()
+        assertEquals(3, vm.uiState.value.automaticCaptureRequestId)
+        vm.onAutomaticImageCaptured(media("changed-b", "ffffffffffffffff"))
+        advanceTimeBy(8_000)
+        runCurrent()
+
+        assertEquals(2, interpreter.answerCalls)
+    }
+
     @Test fun `request ceiling stops session`() = viewModelRunTest {
         val interpreter = RecordingInterpreter()
         val vm = readyVm(interpreter)
@@ -111,6 +192,8 @@ class AutomaticPracticeWorkflowTest {
         vm.setResultDisplaySeconds(3)
         vm.startAutomaticPractice()
         vm.automaticCameraReady()
+        advanceTimeBy(700)
+        runCurrent()
         vm.onAutomaticImageCaptured(media("one", "0000000000000000"))
         runCurrent()
         advanceTimeBy(4_500)
@@ -122,7 +205,7 @@ class AutomaticPracticeWorkflowTest {
         vm.onAutomaticImageCaptured(media("changed-b", "ffffffffffffffff"))
         runCurrent()
 
-        assertEquals(AutomaticPracticeState.STOPPED, vm.uiState.value.automaticState)
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
         assertTrue(vm.uiState.value.automaticStatus.contains("limit"))
         assertEquals(1, interpreter.answerCalls)
     }
@@ -135,14 +218,54 @@ class AutomaticPracticeWorkflowTest {
         assertEquals(AutomaticPracticeState.PAUSED, vm.uiState.value.automaticState)
 
         vm.resumeAutomaticPractice()
-        assertEquals(AutomaticPracticeState.CAPTURING, vm.uiState.value.automaticState)
+        assertEquals(AutomaticPracticeState.CAMERA_STARTING, vm.uiState.value.automaticState)
 
         vm.stopAutomaticPractice()
-        assertEquals(AutomaticPracticeState.STOPPED, vm.uiState.value.automaticState)
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
 
         vm.startAutomaticPractice()
         vm.onBackgrounded()
-        assertEquals(AutomaticPracticeState.STOPPED, vm.uiState.value.automaticState)
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
+    }
+
+    @Test fun `stop returns to configuring and cancels pending focus capture`() = viewModelRunTest {
+        val vm = readyVm()
+
+        vm.startAutomaticPractice()
+        vm.automaticCameraReady()
+        assertEquals(AutomaticPracticeState.WAITING_FOR_FOCUS, vm.uiState.value.automaticState)
+
+        vm.stopAutomaticPractice()
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
+        assertFalse(vm.uiState.value.scanning)
+        assertEquals(0, vm.uiState.value.automaticCaptureRequestId)
+    }
+
+    @Test fun `settings layout contract keeps all options scroll reachable`() {
+        val contract = AutomaticPracticeSettingsLayoutContract
+
+        assertEquals(
+            listOf(
+                contract.modeLabel,
+                contract.resultDurationLabel,
+                contract.orientationLabel,
+                contract.explanationLabel,
+                contract.automaticallyContinueLabel,
+                contract.requestLimitLabel,
+            ),
+            contract.requiredChoices,
+        )
+        assertTrue(contract.usesSingleVerticalScroll)
+        assertTrue(contract.hasVisibleOverflowScrollThumb)
+        assertTrue(contract.respectsSafeDrawingInsets)
+        assertTrue(contract.contentCanOverflow(viewportHeightDp = 568))
+        assertTrue(contract.allSettingsReachable(viewportHeightDp = 568))
+        assertTrue(contract.contentCanOverflow(viewportHeightDp = 320))
+        assertTrue(contract.allSettingsReachable(viewportHeightDp = 320))
+        assertEquals("Start automatic practice", contract.startAutomaticLabel)
     }
 
     @Test fun `manual modes remain selectable without altering default`() {

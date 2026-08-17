@@ -36,7 +36,7 @@ import kotlinx.coroutines.launch
 
 enum class PracticeMode { AUTOMATIC_AI_PRACTICE, MANUAL_CAPTURE, MANUAL_CROP_REVIEW }
 enum class AutomaticPracticeState {
-    IDLE,
+    CONFIGURING,
     CAMERA_STARTING,
     WAITING_FOR_FOCUS,
     CAPTURING,
@@ -51,7 +51,7 @@ enum class AutomaticPracticeState {
 enum class CaptureOrientation { AUTO, PORTRAIT, LANDSCAPE }
 
 data class PracticeLensUiState(
-    val disclosureAccepted: Boolean = false,
+    val disclosureAccepted: Boolean = true,
     val cameraPermissionGranted: Boolean = false,
     val cameraPermissionPermanentlyDenied: Boolean = false,
     val scanning: Boolean = false,
@@ -75,7 +75,7 @@ data class PracticeLensUiState(
     val captureOrientation: CaptureOrientation = CaptureOrientation.AUTO,
     val includeExplanation: Boolean = true,
     val automaticallyContinue: Boolean = true,
-    val automaticState: AutomaticPracticeState = AutomaticPracticeState.IDLE,
+    val automaticState: AutomaticPracticeState = AutomaticPracticeState.CONFIGURING,
     val automaticStatus: String = "Ready",
     val automaticResult: AutomaticAnswer? = null,
     val automaticCaptureRequestId: Long = 0,
@@ -116,7 +116,6 @@ class PracticeLensViewModel(
             it.copy(
                 cameraPermissionGranted = granted,
                 cameraPermissionPermanentlyDenied = !granted && permanentlyDenied,
-                scanning = granted && it.disclosureAccepted && it.attempt == null && it.ocrReview == null,
             )
         }
     }
@@ -145,7 +144,7 @@ class PracticeLensViewModel(
                 attempt = null,
                 autoNextRemainingSeconds = 0,
                 autoNextProgress = 0f,
-                automaticState = AutomaticPracticeState.IDLE,
+                automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = "Ready",
                 automaticResult = null,
             )
@@ -178,7 +177,7 @@ class PracticeLensViewModel(
     }
 
     fun setPracticeMode(mode: PracticeMode) {
-        stopAutomaticPractice()
+        if (_uiState.value.automaticState != AutomaticPracticeState.CONFIGURING) stopAutomaticPractice()
         _uiState.update { it.copy(practiceMode = mode) }
     }
 
@@ -202,10 +201,18 @@ class PracticeLensViewModel(
         if (limit in 1..100) _uiState.update { it.copy(automaticRequestCeiling = limit) }
     }
 
+    fun startSelectedPractice() {
+        when (_uiState.value.practiceMode) {
+            PracticeMode.AUTOMATIC_AI_PRACTICE -> startAutomaticPractice()
+            PracticeMode.MANUAL_CAPTURE,
+            PracticeMode.MANUAL_CROP_REVIEW -> resumeScanning()
+        }
+    }
+
     fun startAutomaticPractice() {
         val state = _uiState.value
         if (!state.cameraPermissionGranted || !state.disclosureAccepted) return
-        if (state.automaticState !in setOf(AutomaticPracticeState.IDLE, AutomaticPracticeState.STOPPED, AutomaticPracticeState.RECOVERABLE_ERROR)) return
+        if (state.automaticState !in setOf(AutomaticPracticeState.CONFIGURING, AutomaticPracticeState.RECOVERABLE_ERROR)) return
         automaticJob?.cancel()
         automaticSessionGeneration++
         automaticSingleFlight = false
@@ -238,7 +245,24 @@ class PracticeLensViewModel(
     fun automaticCameraReady() {
         val state = _uiState.value
         if (state.automaticState != AutomaticPracticeState.CAMERA_STARTING || automaticSingleFlight) return
-        requestAutomaticCapture("Focusing")
+        val session = automaticSessionGeneration
+        automaticSingleFlight = true
+        automaticJob?.cancel()
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.WAITING_FOR_FOCUS,
+                automaticStatus = "Focusing",
+            )
+        }
+        automaticJob = viewModelScope.launch {
+            delay(700)
+            if (
+                session == automaticSessionGeneration &&
+                _uiState.value.automaticState == AutomaticPracticeState.WAITING_FOR_FOCUS
+            ) {
+                requestAutomaticCapture("Capturing")
+            }
+        }
     }
 
     fun pauseAutomaticPractice() {
@@ -254,14 +278,24 @@ class PracticeLensViewModel(
         automaticJob?.cancel()
         automaticSessionGeneration++
         automaticSingleFlight = false
-        _uiState.update { it.copy(automaticState = AutomaticPracticeState.PAUSED, automaticStatus = "Paused") }
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.PAUSED,
+                automaticStatus = "Paused",
+            )
+        }
     }
 
     fun resumeAutomaticPractice() {
         if (_uiState.value.automaticState != AutomaticPracticeState.PAUSED) return
         automaticSessionGeneration++
         automaticJob = viewModelScope.launch { kotlinx.coroutines.awaitCancellation() }
-        requestAutomaticCapture("Focusing")
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.CAMERA_STARTING,
+                automaticStatus = "Starting camera",
+            )
+        }
     }
 
     fun stopAutomaticPractice() {
@@ -273,9 +307,9 @@ class PracticeLensViewModel(
         _uiState.update {
             it.copy(
                 scanning = false,
-                automaticState = AutomaticPracticeState.STOPPED,
+                automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = "Stopped",
-                automaticCaptureRequestId = it.automaticCaptureRequestId + 1,
+                automaticResult = null,
             )
         }
     }
@@ -318,6 +352,11 @@ class PracticeLensViewModel(
     }
 
     fun automaticCaptureFailed(message: String) {
+        if (_uiState.value.automaticState !in setOf(
+                AutomaticPracticeState.WAITING_FOR_FOCUS,
+                AutomaticPracticeState.CAPTURING,
+            )
+        ) return
         automaticSingleFlight = false
         _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = message) }
         scheduleNextCandidate(automaticSessionGeneration, "Recovering")
@@ -356,7 +395,6 @@ class PracticeLensViewModel(
     }
 
     private fun requestAutomaticCapture(status: String) {
-        if (automaticSingleFlight) return
         automaticSingleFlight = true
         _uiState.update {
             it.copy(
@@ -454,8 +492,9 @@ class PracticeLensViewModel(
         _uiState.update {
             it.copy(
                 scanning = false,
-                automaticState = AutomaticPracticeState.STOPPED,
+                automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = message,
+                automaticResult = null,
             )
         }
     }

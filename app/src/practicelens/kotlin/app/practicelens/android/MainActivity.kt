@@ -17,14 +17,18 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -48,6 +52,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -71,11 +76,46 @@ import app.practicelens.android.core.QuestionMediaJanitor
 import app.practicelens.android.ocr.OcrDraft
 import java.util.concurrent.atomic.AtomicReference
 
+internal object AutomaticPracticeSettingsLayoutContract {
+    const val title = "PracticeLens"
+    const val modeLabel = "Mode"
+    const val resultDurationLabel = "Result display duration"
+    const val orientationLabel = "Capture orientation"
+    const val explanationLabel = "Include explanation"
+    const val automaticallyContinueLabel = "Automatically continue"
+    const val requestLimitLabel = "Session request ceiling"
+    const val startAutomaticLabel = "Start automatic practice"
+    const val openCameraLabel = "Open camera"
+    const val usesSingleVerticalScroll = true
+    const val hasVisibleOverflowScrollThumb = true
+    const val respectsSafeDrawingInsets = true
+    const val estimatedContentHeightDp = 720
+
+    val requiredChoices = listOf(
+        modeLabel,
+        resultDurationLabel,
+        orientationLabel,
+        explanationLabel,
+        automaticallyContinueLabel,
+        requestLimitLabel,
+    )
+
+    fun allSettingsReachable(viewportHeightDp: Int): Boolean =
+        viewportHeightDp > 0 &&
+            usesSingleVerticalScroll &&
+            hasVisibleOverflowScrollThumb &&
+            respectsSafeDrawingInsets
+
+    fun contentCanOverflow(viewportHeightDp: Int): Boolean =
+        estimatedContentHeightDp > viewportHeightDp
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: PracticeLensViewModel by viewModels()
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val permanentlyDenied = !granted && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
         viewModel.setCameraPermission(granted, permanentlyDenied)
+        if (granted) viewModel.startSelectedPractice()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -125,18 +165,13 @@ fun PracticeLensApp(
             val reviewDraft = state.ocrReview
             val capturedImage = state.capturedImage
             when {
-                !state.disclosureAccepted -> DisclosureScreen {
-                    viewModel.acceptDisclosure()
-                    if (state.cameraPermissionGranted) viewModel.startAutomaticPractice() else onRequestCamera()
-                }
-                !state.cameraPermissionGranted -> CameraPermissionScreen(
+                !state.cameraPermissionGranted && state.cameraPermissionPermanentlyDenied -> CameraPermissionScreen(
                     permanentlyDenied = state.cameraPermissionPermanentlyDenied,
                     onRetry = onRequestCamera,
                     onOpenSettings = onOpenSettings,
                 )
                 state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE &&
-                    state.automaticState != AutomaticPracticeState.IDLE &&
-                    state.automaticState != AutomaticPracticeState.STOPPED -> AutomaticPracticeScreen(state, viewModel)
+                    state.automaticState != AutomaticPracticeState.CONFIGURING -> AutomaticPracticeScreen(state, viewModel)
                 state.practiceMode == PracticeMode.MANUAL_CAPTURE &&
                     state.automaticState in setOf(AutomaticPracticeState.ANALYZING, AutomaticPracticeState.SHOWING_RESULT, AutomaticPracticeState.RECOVERABLE_ERROR) ->
                     ManualAiResultScreen(state, viewModel)
@@ -160,10 +195,14 @@ fun PracticeLensApp(
                     onAutomaticallyContinue = viewModel::setAutomaticallyContinue,
                     onRequestCeiling = viewModel::setAutomaticRequestCeiling,
                     onScan = {
-                        when (state.practiceMode) {
-                            PracticeMode.AUTOMATIC_AI_PRACTICE -> viewModel.startAutomaticPractice()
-                            PracticeMode.MANUAL_CAPTURE,
-                            PracticeMode.MANUAL_CROP_REVIEW -> viewModel.resumeScanning()
+                        if (!state.cameraPermissionGranted) {
+                            onRequestCamera()
+                        } else {
+                            when (state.practiceMode) {
+                                PracticeMode.AUTOMATIC_AI_PRACTICE -> viewModel.startAutomaticPractice()
+                                PracticeMode.MANUAL_CAPTURE,
+                                PracticeMode.MANUAL_CROP_REVIEW -> viewModel.resumeScanning()
+                            }
                         }
                     },
                 )
@@ -212,59 +251,106 @@ private fun WaitingScreen(
     onRequestCeiling: (Int) -> Unit,
     onScan: () -> Unit,
 ) {
-    Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Text("PracticeLens", style = MaterialTheme.typography.headlineMedium)
-        Text("Mode")
-        PracticeMode.values().forEach { mode ->
+    val scroll = rememberScrollState()
+    Box(Modifier.fillMaxSize().padding(WindowInsets.safeDrawing.asPaddingValues())) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .verticalScroll(scroll)
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(AutomaticPracticeSettingsLayoutContract.title, style = MaterialTheme.typography.headlineMedium)
+            Text(AutomaticPracticeSettingsLayoutContract.modeLabel)
+            PracticeMode.values().forEach { mode ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = state.practiceMode == mode, onClick = { onMode(mode) })
+                    Text(
+                        when (mode) {
+                            PracticeMode.AUTOMATIC_AI_PRACTICE -> "Automatic AI Practice"
+                            PracticeMode.MANUAL_CAPTURE -> "Manual capture"
+                            PracticeMode.MANUAL_CROP_REVIEW -> "Manual crop and review"
+                        },
+                    )
+                }
+            }
+            Text(AutomaticPracticeSettingsLayoutContract.resultDurationLabel)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(3, 5, 8, 10).forEach { seconds ->
+                    OutlinedButton(onClick = { onResultDuration(seconds) }, enabled = state.resultDisplaySeconds != seconds) {
+                        Text("${seconds}s")
+                    }
+                }
+            }
+            Text(AutomaticPracticeSettingsLayoutContract.orientationLabel)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CaptureOrientation.values().forEach { orientation ->
+                    OutlinedButton(onClick = { onOrientation(orientation) }, enabled = state.captureOrientation != orientation) {
+                        Text(orientation.name.lowercase().replaceFirstChar { it.uppercase() })
+                    }
+                }
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                RadioButton(selected = state.practiceMode == mode, onClick = { onMode(mode) })
+                Checkbox(checked = state.includeExplanation, onCheckedChange = onIncludeExplanation)
+                Text(AutomaticPracticeSettingsLayoutContract.explanationLabel)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = state.automaticallyContinue, onCheckedChange = onAutomaticallyContinue)
+                Text(AutomaticPracticeSettingsLayoutContract.automaticallyContinueLabel)
+            }
+            Text(AutomaticPracticeSettingsLayoutContract.requestLimitLabel)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(10, 30, 60).forEach { limit ->
+                    OutlinedButton(onClick = { onRequestCeiling(limit) }, enabled = state.automaticRequestCeiling != limit) {
+                        Text(limit.toString())
+                    }
+                }
+            }
+            scannerError?.let { Text(it) }
+            state.automaticStatus.takeIf { it != "Ready" && state.automaticState == AutomaticPracticeState.CONFIGURING }?.let { Text(it) }
+            Button(onClick = onScan, modifier = Modifier.fillMaxWidth().sizeIn(minHeight = 56.dp)) {
                 Text(
-                    when (mode) {
-                        PracticeMode.AUTOMATIC_AI_PRACTICE -> "Automatic AI Practice"
-                        PracticeMode.MANUAL_CAPTURE -> "Manual capture"
-                        PracticeMode.MANUAL_CROP_REVIEW -> "Manual crop and review"
+                    if (state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE) {
+                        AutomaticPracticeSettingsLayoutContract.startAutomaticLabel
+                    } else {
+                        AutomaticPracticeSettingsLayoutContract.openCameraLabel
                     },
                 )
             }
         }
-        Text("Result display duration")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(3, 5, 8, 10).forEach { seconds ->
-                OutlinedButton(onClick = { onResultDuration(seconds) }, enabled = state.resultDisplaySeconds != seconds) {
-                    Text("${seconds}s")
-                }
-            }
-        }
-        Text("Capture orientation")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            CaptureOrientation.values().forEach { orientation ->
-                OutlinedButton(onClick = { onOrientation(orientation) }, enabled = state.captureOrientation != orientation) {
-                    Text(orientation.name.lowercase().replaceFirstChar { it.uppercase() })
-                }
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = state.includeExplanation, onCheckedChange = onIncludeExplanation)
-            Text("Include explanation")
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Checkbox(checked = state.automaticallyContinue, onCheckedChange = onAutomaticallyContinue)
-            Text("Automatically continue")
-        }
-        Text("Session request ceiling")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            listOf(10, 30, 60).forEach { limit ->
-                OutlinedButton(onClick = { onRequestCeiling(limit) }, enabled = state.automaticRequestCeiling != limit) {
-                    Text(limit.toString())
-                }
-            }
-        }
-        scannerError?.let { Text(it) }
-        state.automaticStatus.takeIf { state.automaticState == AutomaticPracticeState.STOPPED }?.let { Text(it) }
-        Button(onClick = onScan, modifier = Modifier.sizeIn(minHeight = 48.dp)) {
-            Text(if (state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE) "Start automatic practice" else "Open camera")
+        if (scroll.maxValue > 0) {
+            VerticalScrollThumb(
+                scrollValue = scroll.value,
+                maxScrollValue = scroll.maxValue,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(6.dp)
+                    .padding(vertical = 8.dp, horizontal = 1.dp)
+                    .semantics { contentDescription = "Settings scroll indicator" },
+            )
         }
     }
+}
+
+@Composable
+private fun VerticalScrollThumb(scrollValue: Int, maxScrollValue: Int, modifier: Modifier = Modifier) {
+    val thumbColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)
+    Box(
+        modifier.drawBehind {
+            if (maxScrollValue <= 0) return@drawBehind
+            val thumbHeight = (size.height * size.height / (size.height + maxScrollValue.toFloat()))
+                .coerceAtLeast(48.dp.toPx())
+                .coerceAtMost(size.height)
+            val top = (size.height - thumbHeight) * (scrollValue.toFloat() / maxScrollValue.toFloat())
+            drawRoundRect(
+                color = thumbColor,
+                topLeft = androidx.compose.ui.geometry.Offset(0f, top),
+                size = androidx.compose.ui.geometry.Size(size.width, thumbHeight),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(size.width / 2f, size.width / 2f),
+            )
+        },
+    )
 }
 
 @Composable

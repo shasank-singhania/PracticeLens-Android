@@ -28,13 +28,13 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class PracticeLensViewModelTest {
-    @Test fun `disclosure precedes permission-driven scanning`() {
+    @Test fun `permission alone does not bypass pre session settings`() {
         val vm = PracticeLensViewModel(FakeClock)
 
         vm.setCameraPermission(true)
         assertFalse(vm.uiState.value.scanning)
+        assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
 
-        vm.acceptDisclosure()
         vm.resumeScanning()
         assertTrue(vm.uiState.value.scanning)
     }
