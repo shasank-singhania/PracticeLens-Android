@@ -45,6 +45,8 @@ class PracticeLensViewModelTest {
 
         vm.openOcrReview(OcrObservation("Question\nA. One"))
         vm.addOcrOption()
+        vm.editOcrOptionText(0, "One")
+        vm.addOcrOption()
         vm.editOcrOptionText(1, "Two")
         vm.editOcrQuestion("Corrected question")
         vm.confirmOcrDraft()

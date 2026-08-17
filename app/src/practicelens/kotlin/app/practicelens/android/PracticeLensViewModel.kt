@@ -131,6 +131,32 @@ class PracticeLensViewModel(
         }
     }
 
+    fun mergeOcrOptionWithPrevious(index: Int) {
+        updateOcrDraft {
+            if (index <= 0 || index !in it.options.indices) return@updateOcrDraft it
+            val options = it.options.toMutableList()
+            val previous = options[index - 1]
+            val current = options.removeAt(index)
+            options[index - 1] = previous.copy(text = listOf(previous.text, current.text).filter(String::isNotBlank).joinToString("\n"))
+            parser.validate(it.question, options, it.rawText)
+        }
+    }
+
+    fun splitOcrOption(index: Int) {
+        updateOcrDraft {
+            if (it.options.size >= 8 || index !in it.options.indices) return@updateOcrDraft it
+            val option = it.options[index]
+            val parts = option.text.lines().map(String::trim).filter(String::isNotBlank)
+            if (parts.size < 2) return@updateOcrDraft it
+            val used = it.options.map { existing -> existing.label }.toSet()
+            val nextLabel = ('A'..'H').map(Char::toString).firstOrNull { label -> label !in used } ?: return@updateOcrDraft it
+            val options = it.options.toMutableList()
+            options[index] = option.copy(text = parts.first())
+            options.add(index + 1, OcrOptionDraft(nextLabel, parts.drop(1).joinToString("\n")))
+            parser.validate(it.question, options, it.rawText)
+        }
+    }
+
     fun rejectOcr() {
         _uiState.update { it.copy(scanning = false, ocrReview = null) }
     }

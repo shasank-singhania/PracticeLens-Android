@@ -25,14 +25,14 @@ fun interface FrameMetricsCalculator<F : CloseableFrame> {
     fun calculate(frame: F): FrameMetrics
 }
 
-interface FrameTextRecognizer<F : CloseableFrame> {
-    fun recognize(frame: F, onComplete: (Result<OcrObservation>) -> Unit)
+interface OcrEngine<I> {
+    fun recognize(input: I, onComplete: (Result<OcrObservation>) -> Unit)
     fun close()
 }
 
 class LuminanceFrameMetricsCalculator(
-    private val cropFractionWidth: Float = 0.88f,
-    private val cropFractionHeight: Float = 0.58f,
+    private val cropFractionWidth: Float = 0.94f,
+    private val cropFractionHeight: Float = 0.72f,
     private val sampleSize: Int = 32,
 ) {
     fun cropFor(width: Int, height: Int): CropRegion {
@@ -109,9 +109,8 @@ class LuminanceFrameMetricsCalculator(
 
 class StableOcrFrameAnalyzer<F : CloseableFrame>(
     private val metricsCalculator: FrameMetricsCalculator<F>,
-    private val recognizer: FrameTextRecognizer<F>,
     private val detector: StableFrameDetector,
-    private val onAccepted: (OcrObservation, CroppedFrameCandidate?) -> Unit,
+    private val onStable: () -> Unit,
     private val onRejected: (String) -> Unit = {},
 ) {
     private val busy = AtomicBoolean(false)
@@ -136,30 +135,83 @@ class StableOcrFrameAnalyzer<F : CloseableFrame>(
             onRejected("metrics")
             return
         }
-
-        recognizer.recognize(frame) { result ->
-            try {
-                if (disposed.get() || accepted.get()) return@recognize
-                val observation = result.getOrElse {
-                    onRejected("ocr")
-                    return@recognize
-                }
-                val decision = detector.observe(metrics.copy(ocrText = observation.fullText))
-                if (decision.accepted && accepted.compareAndSet(false, true)) {
-                    onAccepted(observation, decision.sharpest?.candidate ?: metrics.candidate)
-                } else {
-                    onRejected(decision.reason)
-                }
-            } finally {
-                busy.set(false)
-                frame.close()
+        try {
+            val decision = detector.observe(metrics)
+            if (decision.accepted && accepted.compareAndSet(false, true)) {
+                onStable()
+            } else {
+                onRejected(
+                    "${decision.reason}|sharpness=${metrics.sharpness.roundToInt()}" +
+                        "|exposure=${metrics.exposure.roundToInt()}" +
+                        "|stable=${decision.stableCount}",
+                )
             }
+        } finally {
+            busy.set(false)
+            frame.close()
         }
+    }
+
+    fun requestCapture(): Boolean {
+        if (disposed.get()) return false
+        if (!accepted.compareAndSet(false, true)) return false
+        onStable()
+        return true
     }
 
     fun dispose() {
         disposed.set(true)
         detector.reset()
-        recognizer.close()
+    }
+}
+
+enum class ScannerPhase { FRAMING, FOCUSING, CAPTURING, RECOGNIZING, REVIEW_READY, NEEDS_MANUAL_CAPTURE, ERROR }
+
+class ScannerStateMachine(
+    private val timeoutMs: Long = 9_000,
+    private val clock: () -> Long,
+) {
+    var phase: ScannerPhase = ScannerPhase.FRAMING
+        private set
+    private val startedAtMs = clock()
+    private var captureRunning = false
+
+    fun tick(): ScannerPhase {
+        if (phase == ScannerPhase.FRAMING && clock() - startedAtMs >= timeoutMs) {
+            phase = ScannerPhase.NEEDS_MANUAL_CAPTURE
+        }
+        return phase
+    }
+
+    fun beginCapture(manual: Boolean = false): Boolean {
+        tick()
+        if (captureRunning) return false
+        if (phase !in setOf(ScannerPhase.FRAMING, ScannerPhase.NEEDS_MANUAL_CAPTURE) && !manual) return false
+        captureRunning = true
+        phase = ScannerPhase.FOCUSING
+        return true
+    }
+
+    fun capturing() {
+        if (captureRunning) phase = ScannerPhase.CAPTURING
+    }
+
+    fun recognizing() {
+        if (captureRunning) phase = ScannerPhase.RECOGNIZING
+    }
+
+    fun reviewReady() {
+        captureRunning = false
+        phase = ScannerPhase.REVIEW_READY
+    }
+
+    fun fail() {
+        captureRunning = false
+        phase = ScannerPhase.ERROR
+    }
+
+    fun cancel() {
+        captureRunning = false
+        phase = ScannerPhase.ERROR
     }
 }

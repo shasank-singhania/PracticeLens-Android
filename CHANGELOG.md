@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed foreground scanning that could run indefinitely when adjacent ML Kit results differed only by punctuation or whitespace.
+- Extended the stable-frame window for real device OCR latency and tolerated small hand-held camera translations.
+- Added scanner guidance, diagnostic rejection logging, and a `Use current OCR` fallback.
+
 ## 0.1.0
 
 - Rebuilt as PracticeLens with preparation-only product boundary.

@@ -3,20 +3,19 @@ package app.practicelens.android
 import app.practicelens.android.camera.CloseableFrame
 import app.practicelens.android.camera.FrameMetrics
 import app.practicelens.android.camera.FrameMetricsCalculator
-import app.practicelens.android.camera.FrameTextRecognizer
+import app.practicelens.android.camera.ScannerPhase
+import app.practicelens.android.camera.ScannerStateMachine
 import app.practicelens.android.camera.StableFrameDetector
 import app.practicelens.android.camera.StableOcrFrameAnalyzer
-import app.practicelens.android.ocr.OcrObservation
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AnalyzerLifecycleTest {
-    @Test fun `OCR success closes frames and accepts once`() {
-        val recognizer = FakeRecognizer()
+    @Test fun `stable analysis frames close and trigger capture once`() {
         var accepts = 0
-        val analyzer = analyzer(recognizer) { accepts++ }
+        val analyzer = analyzer { accepts++ }
         val frames = listOf(FakeFrame(0), FakeFrame(400), FakeFrame(900))
 
         frames.forEach(analyzer::analyze)
@@ -28,97 +27,96 @@ class AnalyzerLifecycleTest {
 
     @Test fun `metric failure closes frame`() {
         val frame = FakeFrame(0)
-        val recognizer = FakeRecognizer()
         val analyzer = StableOcrFrameAnalyzer(
             metricsCalculator = FrameMetricsCalculator<FakeFrame> { error("boom") },
-            recognizer = recognizer,
             detector = StableFrameDetector(),
-            onAccepted = { _, _ -> },
+            onStable = { },
         )
 
         analyzer.analyze(frame)
 
         assertEquals(1, frame.closeCount)
-        assertEquals(0, recognizer.calls)
     }
 
-    @Test fun `OCR failure and cancellation close frames`() {
-        val recognizer = FakeRecognizer(result = Result.failure(IllegalStateException("no text")))
+    @Test fun `manual capture requests are deduplicated`() {
+        var accepts = 0
+        val analyzer = analyzer { accepts++ }
+
+        assertTrue(analyzer.requestCapture())
+        assertFalse(analyzer.requestCapture())
+        assertEquals(1, accepts)
+    }
+
+    @Test fun `busy analyzer drops and closes new frame`() {
+        val analyzer = StableOcrFrameAnalyzer(
+            metricsCalculator = FrameMetricsCalculator<FakeFrame> {
+                Thread.sleep(50)
+                FrameMetrics(it.timestampMs, ByteArray(32) { 100 }, 40.0, 120.0)
+            },
+            detector = StableFrameDetector(minStableDurationMs = 750, cooldownMs = 0),
+            onStable = {},
+        )
         val frame = FakeFrame(0)
+        val second = FakeFrame(100)
+        val worker = Thread { analyzer.analyze(frame) }
 
-        analyzer(recognizer).analyze(frame)
-
-        assertEquals(1, frame.closeCount)
-    }
-
-    @Test fun `busy recognizer drops and closes new frame`() {
-        val recognizer = FakeRecognizer(pending = true)
-        val analyzer = analyzer(recognizer)
-        val first = FakeFrame(0)
-        val second = FakeFrame(200)
-
-        analyzer.analyze(first)
+        worker.start()
+        Thread.sleep(5)
         analyzer.analyze(second)
+        worker.join()
 
-        assertEquals(0, first.closeCount)
         assertEquals(1, second.closeCount)
-        recognizer.complete(Result.success(OcrObservation("Q\nA. a\nB. b")))
-        assertEquals(1, first.closeCount)
+        assertEquals(1, frame.closeCount)
     }
 
     @Test fun `disposal prevents acceptance callbacks`() {
-        val recognizer = FakeRecognizer(pending = true)
         var accepted = false
-        val analyzer = analyzer(recognizer) { accepted = true }
+        val analyzer = analyzer { accepted = true }
         val frame = FakeFrame(0)
 
-        analyzer.analyze(frame)
         analyzer.dispose()
-        recognizer.complete(Result.success(OcrObservation("Q\nA. a\nB. b")))
+        analyzer.analyze(frame)
 
         assertFalse(accepted)
         assertEquals(1, frame.closeCount)
-        assertTrue(recognizer.closed)
+    }
+
+    @Test fun `scanner timeout transitions to manual capture`() {
+        var now = 0L
+        val state = ScannerStateMachine(timeoutMs = 9_000, clock = { now })
+
+        assertEquals(ScannerPhase.FRAMING, state.tick())
+        now = 9_001
+        assertEquals(ScannerPhase.NEEDS_MANUAL_CAPTURE, state.tick())
+    }
+
+    @Test fun `state machine deduplicates concurrent capture requests`() {
+        val state = ScannerStateMachine(timeoutMs = 9_000, clock = { 0 })
+
+        assertTrue(state.beginCapture())
+        assertFalse(state.beginCapture(manual = true))
+    }
+
+    @Test fun `rotation metadata is preserved in metrics`() {
+        val metrics = FrameMetrics(0, ByteArray(32), 40.0, 120.0, candidate = null)
+
+        assertEquals(0, metrics.timestampMs)
     }
 
     private fun analyzer(
-        recognizer: FakeRecognizer,
         onAccepted: () -> Unit = {},
     ) = StableOcrFrameAnalyzer(
         metricsCalculator = FrameMetricsCalculator<FakeFrame> {
             FrameMetrics(it.timestampMs, ByteArray(32) { 100 }, 40.0, 120.0)
         },
-        recognizer = recognizer,
         detector = StableFrameDetector(minStableDurationMs = 750, cooldownMs = 0),
-        onAccepted = { _, _ -> onAccepted() },
+        onStable = { onAccepted() },
     )
 
     private class FakeFrame(override val timestampMs: Long) : CloseableFrame {
         var closeCount = 0
         override fun close() {
             closeCount++
-        }
-    }
-
-    private class FakeRecognizer(
-        private val result: Result<OcrObservation> = Result.success(OcrObservation("Q\nA. a\nB. b")),
-        private val pending: Boolean = false,
-    ) : FrameTextRecognizer<FakeFrame> {
-        private val callbacks = ArrayDeque<(Result<OcrObservation>) -> Unit>()
-        var calls = 0
-        var closed = false
-
-        override fun recognize(frame: FakeFrame, onComplete: (Result<OcrObservation>) -> Unit) {
-            calls++
-            if (pending) callbacks.addLast(onComplete) else onComplete(result)
-        }
-
-        fun complete(value: Result<OcrObservation>) {
-            callbacks.removeFirst().invoke(value)
-        }
-
-        override fun close() {
-            closed = true
         }
     }
 }

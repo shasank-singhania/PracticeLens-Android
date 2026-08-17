@@ -9,11 +9,38 @@ data class OcrTextLine(
     val top: Int = 0,
     val right: Int = 0,
     val bottom: Int = 0,
+    val elements: List<OcrTextElement> = emptyList(),
+    val confidence: Float? = null,
+    val recognizedLanguage: String? = null,
+)
+
+data class OcrTextElement(
+    val text: String,
+    val left: Int = 0,
+    val top: Int = 0,
+    val right: Int = 0,
+    val bottom: Int = 0,
+    val confidence: Float? = null,
+)
+
+data class OcrTextBlock(
+    val text: String,
+    val left: Int = 0,
+    val top: Int = 0,
+    val right: Int = 0,
+    val bottom: Int = 0,
+    val lines: List<OcrTextLine> = emptyList(),
+    val recognizedLanguage: String? = null,
 )
 
 data class OcrObservation(
     val fullText: String,
-    val lines: List<OcrTextLine> = fullText.lines().map { OcrTextLine(it) },
+    val lines: List<OcrTextLine> = fullText.lines().filter { it.isNotBlank() }.map { OcrTextLine(it) },
+    val blocks: List<OcrTextBlock> = emptyList(),
+    val rotationDegrees: Int = 0,
+    val width: Int = 0,
+    val height: Int = 0,
+    val durationMs: Long = 0,
 )
 
 data class OcrOptionDraft(
@@ -29,6 +56,9 @@ data class OcrDraft(
     val valid: Boolean,
     val message: String,
     val rawText: String,
+    val rawObservation: OcrObservation? = null,
+    val confidence: Double = if (valid) 1.0 else 0.0,
+    val warnings: List<String> = emptyList(),
     val lineCount: Int = rawText.lines().count { it.isNotBlank() },
 ) {
     fun toPracticeQuestion(): PracticeQuestion {
@@ -41,11 +71,31 @@ data class OcrDraft(
 }
 
 class OcrParser {
+    private val extractor = OcrMcqExtractor()
     private val labelPattern = Regex(
         pattern = """^\s*(?:[\(\[]?\s*([A-Ha-h1-8])\s*[\)\].:\-]|([A-Ha-h1-8])\s*[\)\].:\-])\s*(.*)$""",
     )
 
-    fun parse(observation: OcrObservation): OcrDraft = parse(observation.fullText)
+    fun parse(observation: OcrObservation): OcrDraft {
+        val extraction = extractor.extract(observation)
+        if (extraction == null) {
+            return OcrDraft(
+                question = observation.fullText.trim(),
+                options = emptyList(),
+                valid = false,
+                message = "Needs manual review: ${extractor.rejectionReason(observation)}",
+                rawText = observation.fullText,
+                rawObservation = observation,
+                confidence = 0.0,
+            )
+        }
+        val draft = parse(extraction.observation.fullText)
+        return draft.copy(
+            rawObservation = observation,
+            confidence = extraction.confidence,
+            warnings = extraction.warnings,
+        )
+    }
 
     fun parse(text: String): OcrDraft {
         val rawLines = text.replace('\u00a0', ' ').lines()
