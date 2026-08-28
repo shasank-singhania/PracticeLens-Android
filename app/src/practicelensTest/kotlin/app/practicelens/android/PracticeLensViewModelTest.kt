@@ -36,6 +36,10 @@ class PracticeLensViewModelTest {
         assertEquals(AutomaticPracticeState.CONFIGURING, vm.uiState.value.automaticState)
 
         vm.resumeScanning()
+        assertFalse(vm.uiState.value.scanning)
+
+        vm.acceptDisclosure()
+        vm.resumeScanning()
         assertTrue(vm.uiState.value.scanning)
     }
 

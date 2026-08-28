@@ -12,6 +12,14 @@ import org.junit.Test
 class OcrMcqExtractorTest {
     private val extractor = OcrMcqExtractor()
 
+    @Test fun `unicode bullet anchors remain valid utf8 literals`() {
+        assertEquals("•◦○●▪□☐", OcrMcqExtractor.UTF8_BULLET_ANCHORS)
+    }
+
+    @Test fun `unicode math warning symbols remain valid utf8 literals`() {
+        assertTrue(OcrMcqExtractor.UTF8_MATH_SYMBOLS.containsAll(listOf('∑', '√', 'π', 'θ', '≤', '≥', '≠', '∞', '²', '³', '÷', '×')))
+    }
+
     @Test fun `extracts labeled question and ignores page chrome`() {
         val observation = observation(
             "Course header",

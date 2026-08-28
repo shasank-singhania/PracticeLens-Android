@@ -10,23 +10,26 @@ PracticeLens uses only the in-app foreground rear camera. It does not declare or
 
 Default learner flow:
 
-1. Open PracticeLens and grant camera permission.
-2. Frame one visible multiple-choice question with the rear camera and tap `Capture question`.
-3. Freeze a private still image, stop camera analysis, and confirm the crop.
-4. Run on-device OCR on the confirmed crop and let the learner correct the question/options.
-5. Optionally analyze the confirmed crop with production Firebase AI image interpretation.
-6. Let the learner confirm the editable question, then choose and revise an answer.
-7. Evaluate only after the selected option remains unchanged through the grace period.
-8. Show correctness, explanation, warning text, history, and a stoppable auto-next countdown.
+1. Accept the foreground camera disclosure before settings or camera access.
+2. Choose automatic AI practice, manual capture, or manual crop review.
+3. In automatic practice, start the rear camera, wait for readiness and focus settle, capture on an acceptable stable frame, or use a bounded 4-second fallback still with a quality warning.
+4. Normalize captured JPEG orientation before fingerprinting and model submission.
+5. In manual crop review, run on-device OCR on the confirmed crop and let the learner correct the question/options. OCR remains diagnostic/editable assistance only.
+6. Optionally analyze the confirmed crop with production Firebase AI image interpretation.
+7. Let the learner confirm the editable question, then choose and revise an answer.
+8. Evaluate only after the selected option remains unchanged through the grace period.
+9. Show correctness, explanation, warning text, and a stoppable auto-next countdown.
 
 ## Variants
 
 - `demo`: deterministic fake evaluator and offline/manual question review, no Firebase configuration, no Gemini calls, Drive disabled. Suitable for public CI and demo APK releases.
-- `production`: Firebase AI Logic with App Check for confirmed-crop interpretation/evaluation, Google Identity authorization, Drive API backup, and production signing.
+- `production`: Firebase AI Logic with App Check for confirmed-crop interpretation/evaluation and production signing. History and Google Drive backup are planned surfaces until their user-facing wiring is completed.
 
 The demo debug APK application ID is `app.practicelens.android.autopractice.debug`.
 
-State flow: `SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> QUESTION_REVIEW -> ANSWERING -> GRACE_PERIOD -> EVALUATING -> RESULT` or `FAILED`. OCR is draft assistance only; camera capture never depends on OCR/parser validity.
+Manual state flow: `DISCLOSURE -> SETTINGS -> SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> QUESTION_REVIEW -> ANSWERING -> GRACE_PERIOD -> EVALUATING -> RESULT` or `FAILED`.
+
+Automatic state flow: `DISCLOSURE -> SETTINGS -> START -> CAMERA_STARTING -> WAITING_FOR_FOCUS -> CAPTURING -> PREPARING_IMAGE -> ANALYZING -> SHOWING_RESULT -> WAITING_FOR_SCENE_CHANGE -> WAITING_FOR_FOCUS -> CAPTURING`, repeated for each changed question. CameraX `ImageAnalysis` remains active while the answer is displayed and while waiting for scene change, uses `STRATEGY_KEEP_ONLY_LATEST`, and requires two consecutive materially changed scene fingerprints before re-arming the next capture. Still capture and model submission never depend on OCR/parser validity.
 
 ## Build
 

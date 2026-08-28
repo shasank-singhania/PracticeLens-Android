@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.Surface
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.FocusMeteringAction
@@ -21,6 +22,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import app.practicelens.android.CaptureOrientation
 import app.practicelens.android.core.CapturedQuestionMedia
 import app.practicelens.android.ocr.OcrObservation
 import app.practicelens.android.ocr.OcrTextBlock
@@ -44,6 +46,9 @@ class CameraScannerController(
     private val onError: (String) -> Unit,
     private val onStatus: (String) -> Unit = {},
     private val onReady: () -> Unit = {},
+    private val onStableFrame: () -> Boolean = { false },
+    private val onSceneFingerprint: (String) -> Unit = {},
+    private val orientation: CaptureOrientation = CaptureOrientation.AUTO,
     private val autoCaptureEnabled: Boolean = false,
 ) {
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -51,6 +56,7 @@ class CameraScannerController(
     private val imagePreparer = AndroidQuestionImagePreparer(context)
     private val stateMachine = ScannerStateMachine(clock = { SystemClock.elapsedRealtime() })
     private var provider: ProcessCameraProvider? = null
+    private var preview: Preview? = null
     private var analysis: ImageAnalysis? = null
     private var imageCapture: ImageCapture? = null
     private var analyzer: StableOcrFrameAnalyzer<ImageProxyFrame>? = null
@@ -69,7 +75,7 @@ class CameraScannerController(
             try {
                 val cameraProvider = providerFuture.get()
                 provider = cameraProvider
-                val preview = Preview.Builder().build().also {
+                val previewUseCase = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
                 val imageAnalysis = if (autoCaptureEnabled) {
@@ -84,7 +90,9 @@ class CameraScannerController(
                     .setResolutionSelector(resolutionSelector)
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
                     .build()
-                val rotation = previewView.display?.rotation ?: 0
+                val policy = CameraUseCasePolicies.forSession(autoCaptureEnabled, orientation, previewView.display?.rotation ?: Surface.ROTATION_0)
+                val rotation = policy.targetRotation
+                previewUseCase.targetRotation = rotation
                 imageAnalysis?.targetRotation = rotation
                 capture.targetRotation = rotation
 
@@ -94,12 +102,18 @@ class CameraScannerController(
                         detector = StableFrameDetector(),
                         onStable = {
                             reportStatus("Stable frame found. Focusing before capture.")
-                            captureQuestion(manual = false)
                         },
                         onRejected = { rejection -> reportRejection(rejection) },
+                        onFrameAnalyzed = { metrics ->
+                            FrameFingerprintPolicy.dHash(metrics.luminanceSample)?.let { hash ->
+                                ContextCompat.getMainExecutor(context).execute { onSceneFingerprint(hash) }
+                            }
+                        },
+                        shouldConsumeStable = onStableFrame,
                     )
                 }
                 analyzer = frameAnalyzer
+                preview = previewUseCase
                 analysis = imageAnalysis
                 imageCapture = capture
                 imageAnalysis?.setAnalyzer(executor) { image ->
@@ -107,7 +121,7 @@ class CameraScannerController(
                 }
                 cameraProvider.unbindAll()
                 val useCaseGroup = UseCaseGroup.Builder()
-                    .addUseCase(preview)
+                    .addUseCase(previewUseCase)
                     .addUseCase(capture)
                     .also { builder -> imageAnalysis?.let(builder::addUseCase) }
                     .also { builder -> previewView.viewPort?.let(builder::setViewPort) }
@@ -117,7 +131,6 @@ class CameraScannerController(
                 logCameraInfo("bound")
                 reportStatus("Frame the full question and tap Capture question.")
                 ContextCompat.getMainExecutor(context).execute { onReady() }
-                if (autoCaptureEnabled) scheduleTimeout()
             } catch (t: Throwable) {
                 Log.e(TAG, "Camera scanner failed to start", t)
                 stop()
@@ -129,27 +142,48 @@ class CameraScannerController(
     fun stop() {
         if (!stopped.compareAndSet(false, true)) return
         captureGeneration.incrementAndGet()
+        captureRunning.set(false)
+        stateMachine.cancel()
         analysis?.clearAnalyzer()
         analyzer?.dispose()
         provider?.unbindAll()
+        preview = null
         analysis = null
         imageCapture = null
         analyzer = null
         camera = null
     }
 
-    fun captureQuestion(manual: Boolean = true): Boolean {
+    fun captureQuestion(manual: Boolean = true, requestedWarning: String? = null): Boolean {
         if (stopped.get() || !captureRunning.compareAndSet(false, true)) return false
         if (!stateMachine.beginCapture(manual)) {
             captureRunning.set(false)
             return false
         }
         analysis?.clearAnalyzer()
+        analyzer?.resetAcceptance()
         ContextCompat.getMainExecutor(context).execute {
             reportStatus(if (manual) "Capturing question..." else "Auto-capturing question...")
-            focusThenCapture(manual)
+            focusThenCapture(manual, requestedWarning)
         }
         return true
+    }
+
+    fun rearmAutomaticAnalysis() {
+        if (stopped.get()) return
+        stateMachine.readyForNextFrame()
+        analyzer?.resetAcceptance()
+        val frameAnalyzer = analyzer
+        analysis?.setAnalyzer(executor) { image ->
+            frameAnalyzer?.analyze(ImageProxyFrame(image)) ?: image.close()
+        }
+    }
+
+    fun updateTargetRotation(nextOrientation: CaptureOrientation = orientation) {
+        val rotation = resolvedTargetRotation(nextOrientation)
+        preview?.targetRotation = rotation
+        analysis?.targetRotation = rotation
+        imageCapture?.targetRotation = rotation
     }
 
     fun dispose() {
@@ -158,7 +192,7 @@ class CameraScannerController(
         executor.shutdownNow()
     }
 
-    private fun focusThenCapture(manual: Boolean) {
+    private fun focusThenCapture(manual: Boolean, requestedWarning: String?) {
         val focusCompleted = AtomicBoolean(false)
         val cameraControl = camera?.cameraControl
         val factory = previewView.meteringPointFactory
@@ -168,19 +202,19 @@ class CameraScannerController(
             .build()
         if (cameraControl == null) {
             reportFocus("focus unavailable; capturing with current focus", manual)
-            takePicture(manual, "Focus unavailable; review OCR carefully.")
+            takePicture(manual, requestedWarning ?: "Focus unavailable; review OCR carefully.")
             return
         }
         cameraControl.startFocusAndMetering(action).addListener({
             if (focusCompleted.compareAndSet(false, true)) {
                 reportFocus("center autofocus completed", manual)
-                takePicture(manual, null)
+                takePicture(manual, requestedWarning)
             }
         }, executor)
         previewView.postDelayed({
             if (focusCompleted.compareAndSet(false, true)) {
                 reportFocus("autofocus timed out; capturing with current focus", manual)
-                takePicture(manual, "Autofocus timed out; review OCR carefully.")
+                takePicture(manual, requestedWarning ?: "Autofocus timed out; review OCR carefully.")
             }
         }, 1_200)
     }
@@ -194,7 +228,7 @@ class CameraScannerController(
             return
         }
         stateMachine.capturing()
-        previewView.display?.rotation?.let { capture.targetRotation = it }
+        updateTargetRotation()
         val outputFile = createCaptureFile()
         val requestGeneration = captureGeneration.incrementAndGet()
         val outputOptions = ImageCapture.OutputFileOptions.Builder(outputFile).build()
@@ -212,6 +246,7 @@ class CameraScannerController(
                         stateMachine.reviewReady()
                         ContextCompat.getMainExecutor(context).execute {
                             if (manual) stop()
+                            if (!manual) rearmAutomaticAnalysis()
                             onCaptured(media)
                         }
                     } catch (t: Throwable) {
@@ -284,6 +319,9 @@ class CameraScannerController(
         }
     }
 
+    private fun resolvedTargetRotation(nextOrientation: CaptureOrientation = orientation): Int =
+        CameraRotationPolicy.targetRotation(nextOrientation, previewView.display?.rotation ?: Surface.ROTATION_0)
+
     private fun reportRejection(rejection: String) {
         Log.d(TAG, "Frame rejected: $rejection")
         val status = when (rejection.substringBefore('|')) {
@@ -316,6 +354,49 @@ class CameraScannerController(
 
     private companion object {
         const val TAG = "PracticeLensScanner"
+    }
+}
+
+object CameraRotationPolicy {
+    fun targetRotation(orientation: CaptureOrientation, displayRotation: Int): Int =
+        when (orientation) {
+            CaptureOrientation.AUTO -> displayRotation
+            CaptureOrientation.PORTRAIT -> Surface.ROTATION_0
+            CaptureOrientation.LANDSCAPE -> Surface.ROTATION_90
+        }
+}
+
+data class CameraUseCasePolicy(
+    val imageAnalysisEnabled: Boolean,
+    val analysisBackpressureStrategy: Int?,
+    val targetRotation: Int,
+)
+
+object CameraUseCasePolicies {
+    fun forSession(autoCaptureEnabled: Boolean, orientation: CaptureOrientation, displayRotation: Int): CameraUseCasePolicy =
+        CameraUseCasePolicy(
+            imageAnalysisEnabled = autoCaptureEnabled,
+            analysisBackpressureStrategy = if (autoCaptureEnabled) ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST else null,
+            targetRotation = CameraRotationPolicy.targetRotation(orientation, displayRotation),
+        )
+}
+
+object FrameFingerprintPolicy {
+    fun dHash(sample: ByteArray): String? {
+        val side = kotlin.math.sqrt(sample.size.toDouble()).toInt()
+        if (side * side != sample.size || side < 9) return null
+        var bits = 0UL
+        for (y in 0 until 8) {
+            val sourceY = ((y + 0.5f) * side / 8).toInt().coerceIn(0, side - 1)
+            for (x in 0 until 8) {
+                val leftX = ((x + 0.5f) * side / 9).toInt().coerceIn(0, side - 1)
+                val rightX = (((x + 1) + 0.5f) * side / 9).toInt().coerceIn(0, side - 1)
+                val left = sample[sourceY * side + leftX].toInt() and 0xff
+                val right = sample[sourceY * side + rightX].toInt() and 0xff
+                bits = (bits shl 1) or if (left > right) 1UL else 0UL
+            }
+        }
+        return bits.toString(16).padStart(16, '0')
     }
 }
 

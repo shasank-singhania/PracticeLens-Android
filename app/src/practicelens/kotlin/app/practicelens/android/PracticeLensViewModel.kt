@@ -1,5 +1,6 @@
 package app.practicelens.android
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.practicelens.android.camera.CropOcrProcessor
@@ -50,8 +51,27 @@ enum class AutomaticPracticeState {
 }
 enum class CaptureOrientation { AUTO, PORTRAIT, LANDSCAPE }
 
+interface DisclosureAcceptanceStore {
+    fun isAccepted(): Boolean
+    fun setAccepted(accepted: Boolean)
+    fun reset()
+}
+
+class InMemoryDisclosureAcceptanceStore(
+    initialAccepted: Boolean = false,
+) : DisclosureAcceptanceStore {
+    private var accepted = initialAccepted
+    override fun isAccepted(): Boolean = accepted
+    override fun setAccepted(accepted: Boolean) {
+        this.accepted = accepted
+    }
+    override fun reset() {
+        accepted = false
+    }
+}
+
 data class PracticeLensUiState(
-    val disclosureAccepted: Boolean = true,
+    val disclosureAccepted: Boolean = false,
     val cameraPermissionGranted: Boolean = false,
     val cameraPermissionPermanentlyDenied: Boolean = false,
     val scanning: Boolean = false,
@@ -79,6 +99,8 @@ data class PracticeLensUiState(
     val automaticStatus: String = "Ready",
     val automaticResult: AutomaticAnswer? = null,
     val automaticCaptureRequestId: Long = 0,
+    val automaticCaptureQualityWarning: String? = null,
+    val automaticAnalysisResetId: Long = 0,
     val automaticRequestCount: Int = 0,
     val automaticRequestCeiling: Int = 30,
 )
@@ -87,6 +109,7 @@ class PracticeLensViewModel(
     private val clock: MonotonicClock = SystemMonotonicClock,
     private val interpreter: QuestionImageInterpreter = InterpreterFactory.create(),
     private val evaluator: GeminiEvaluator = EvaluatorFactory.create(),
+    private val disclosureStore: DisclosureAcceptanceStore = InMemoryDisclosureAcceptanceStore(),
 ) : ViewModel() {
     private val reducer = PracticeReducer(clock)
     private val parser = OcrParser()
@@ -100,15 +123,30 @@ class PracticeLensViewModel(
     private var automaticSessionGeneration: Long = 0
     private var lastSubmittedDHash: String? = null
     private var lastAnsweredDHash: String? = null
+    private var lastAcceptedSceneDHash: String? = null
+    private var latestObservedSceneDHash: String? = null
     private var consecutiveChangedScenes: Int = 0
+    private var sceneCandidateDHash: String? = null
     private var lastModelRequestAtMs: Long = Long.MIN_VALUE
     private var automaticSingleFlight = false
+    private var automaticFocusSettled = false
     private val interpretedFingerprints = mutableSetOf<String>()
     private val _uiState = MutableStateFlow(PracticeLensUiState())
     val uiState: StateFlow<PracticeLensUiState> = _uiState
 
+    init {
+        _uiState.update { it.copy(disclosureAccepted = disclosureStore.isAccepted()) }
+    }
+
     fun acceptDisclosure() {
+        disclosureStore.setAccepted(true)
         _uiState.update { it.copy(disclosureAccepted = true) }
+    }
+
+    fun resetDisclosureForTests() {
+        disclosureStore.reset()
+        stopAutomaticPractice()
+        _uiState.update { it.copy(disclosureAccepted = false, scanning = false) }
     }
 
     fun setCameraPermission(granted: Boolean, permanentlyDenied: Boolean = false) {
@@ -147,6 +185,7 @@ class PracticeLensViewModel(
                 automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = "Ready",
                 automaticResult = null,
+                automaticCaptureQualityWarning = null,
             )
         }
     }
@@ -216,6 +255,10 @@ class PracticeLensViewModel(
         automaticJob?.cancel()
         automaticSessionGeneration++
         automaticSingleFlight = false
+        automaticFocusSettled = false
+        sceneCandidateDHash = null
+        lastAcceptedSceneDHash = null
+        latestObservedSceneDHash = null
         lastSubmittedDHash = null
         lastAnsweredDHash = null
         consecutiveChangedScenes = 0
@@ -232,6 +275,7 @@ class PracticeLensViewModel(
                 automaticRequestCount = 0,
             )
         }
+        loopLog("start", session, "session-start")
         automaticJob = viewModelScope.launch {
             try {
                 kotlinx.coroutines.awaitCancellation()
@@ -245,22 +289,76 @@ class PracticeLensViewModel(
     fun automaticCameraReady() {
         val state = _uiState.value
         if (state.automaticState != AutomaticPracticeState.CAMERA_STARTING || automaticSingleFlight) return
-        val session = automaticSessionGeneration
-        automaticSingleFlight = true
+        beginFocusCycle(automaticSessionGeneration, "camera-ready")
+    }
+
+    fun automaticStableFrameAccepted(): Boolean {
+        val state = _uiState.value
+        if (state.automaticState != AutomaticPracticeState.WAITING_FOR_FOCUS || !automaticFocusSettled || automaticSingleFlight) {
+            loopLog("stable-suppressed", automaticSessionGeneration, "stable")
+            return false
+        }
+        requestAutomaticCapture("Capturing stable frame", triggerReason = "stable")
+        return true
+    }
+
+    fun automaticSceneObserved(fingerprint: String) {
+        latestObservedSceneDHash = fingerprint
+        val state = _uiState.value
+        if (state.automaticState != AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE) return
+        val answered = lastAcceptedSceneDHash ?: lastAnsweredDHash ?: return
+        val distance = app.practicelens.android.camera.QuestionImagePreparationCore.hammingDistance(fingerprint, answered)
+        if (distance <= SCENE_CHANGE_HAMMING_THRESHOLD) {
+            consecutiveChangedScenes = 0
+            sceneCandidateDHash = null
+            loopLog("scene-suppressed", automaticSessionGeneration, "unchanged", distance)
+            return
+        }
+        if (sceneCandidateDHash == fingerprint) {
+            consecutiveChangedScenes++
+        } else {
+            sceneCandidateDHash = fingerprint
+            consecutiveChangedScenes = 1
+        }
+        loopLog("scene-observed", automaticSessionGeneration, "scene-changed", distance)
+        if (consecutiveChangedScenes < REQUIRED_CHANGED_OBSERVATIONS) return
+        consecutiveChangedScenes = 0
+        sceneCandidateDHash = null
+        beginFocusCycle(automaticSessionGeneration, "scene-changed")
+    }
+
+    private fun beginFocusCycle(session: Long, triggerReason: String) {
         automaticJob?.cancel()
+        automaticFocusSettled = false
         _uiState.update {
             it.copy(
                 automaticState = AutomaticPracticeState.WAITING_FOR_FOCUS,
                 automaticStatus = "Focusing",
+                automaticCaptureQualityWarning = null,
+                automaticAnalysisResetId = it.automaticAnalysisResetId + 1,
             )
         }
+        loopLog("focus", session, triggerReason)
         automaticJob = viewModelScope.launch {
             delay(700)
             if (
                 session == automaticSessionGeneration &&
                 _uiState.value.automaticState == AutomaticPracticeState.WAITING_FOR_FOCUS
             ) {
-                requestAutomaticCapture("Capturing")
+                automaticFocusSettled = true
+                _uiState.update { it.copy(automaticStatus = "Hold steady") }
+                loopLog("focus-settled", session, triggerReason)
+            }
+            delay(3_300)
+            if (
+                session == automaticSessionGeneration &&
+                _uiState.value.automaticState == AutomaticPracticeState.WAITING_FOR_FOCUS
+            ) {
+                requestAutomaticCapture(
+                    status = "Capturing fallback",
+                    qualityWarning = "Quality fallback: no stable frame arrived within 4 seconds; review the answer carefully.",
+                    triggerReason = "fallback",
+                )
             }
         }
     }
@@ -278,10 +376,14 @@ class PracticeLensViewModel(
         automaticJob?.cancel()
         automaticSessionGeneration++
         automaticSingleFlight = false
+        automaticFocusSettled = false
+        sceneCandidateDHash = null
+        latestObservedSceneDHash = null
         _uiState.update {
             it.copy(
                 automaticState = AutomaticPracticeState.PAUSED,
                 automaticStatus = "Paused",
+                automaticCaptureQualityWarning = null,
             )
         }
     }
@@ -289,11 +391,16 @@ class PracticeLensViewModel(
     fun resumeAutomaticPractice() {
         if (_uiState.value.automaticState != AutomaticPracticeState.PAUSED) return
         automaticSessionGeneration++
+        automaticSingleFlight = false
+        automaticFocusSettled = false
+        sceneCandidateDHash = null
+        latestObservedSceneDHash = null
         automaticJob = viewModelScope.launch { kotlinx.coroutines.awaitCancellation() }
         _uiState.update {
             it.copy(
                 automaticState = AutomaticPracticeState.CAMERA_STARTING,
                 automaticStatus = "Starting camera",
+                automaticCaptureQualityWarning = null,
             )
         }
     }
@@ -303,6 +410,9 @@ class PracticeLensViewModel(
         automaticJob = null
         automaticSessionGeneration++
         automaticSingleFlight = false
+        automaticFocusSettled = false
+        sceneCandidateDHash = null
+        latestObservedSceneDHash = null
         retireActiveMedia()
         _uiState.update {
             it.copy(
@@ -310,24 +420,34 @@ class PracticeLensViewModel(
                 automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = "Stopped",
                 automaticResult = null,
+                automaticCaptureQualityWarning = null,
             )
         }
     }
 
-    fun onAutomaticImageCaptured(media: CapturedQuestionMedia) {
+    fun onAutomaticImageCaptured(media: CapturedQuestionMedia, requestId: Long = _uiState.value.automaticCaptureRequestId) {
         val session = automaticSessionGeneration
         val state = _uiState.value
-        if (state.automaticState !in setOf(AutomaticPracticeState.CAPTURING, AutomaticPracticeState.WAITING_FOR_FOCUS)) {
+        if (requestId != state.automaticCaptureRequestId) {
+            loopLog("capture-suppressed", session, "stale-request")
+            QuestionMediaJanitor.delete(media)
+            return
+        }
+        if (state.automaticState != AutomaticPracticeState.CAPTURING) {
+            loopLog("capture-suppressed", session, "state-${state.automaticState}")
             QuestionMediaJanitor.delete(media)
             return
         }
         val hash = media.perceptualHash()
+        lastAcceptedSceneDHash = latestObservedSceneDHash ?: hash
         automaticSingleFlight = false
+        automaticFocusSettled = false
         _uiState.update {
             it.copy(
                 automaticState = AutomaticPracticeState.PREPARING_IMAGE,
                 automaticStatus = "Preparing image",
                 capturedImage = media,
+                automaticCaptureQualityWarning = null,
             )
         }
         if (state.automaticRequestCount >= state.automaticRequestCeiling) {
@@ -335,19 +455,11 @@ class PracticeLensViewModel(
             stopWithLocalAutomaticMessage("Session request limit reached.")
             return
         }
-        val answeredDistance = app.practicelens.android.camera.QuestionImagePreparationCore.hammingDistance(hash, lastAnsweredDHash)
-        if (lastAnsweredDHash != null && answeredDistance <= 10) {
+        if (hash != null && hash == lastSubmittedDHash) {
+            loopLog("capture-suppressed", session, "duplicate-submitted")
             QuestionMediaJanitor.delete(media)
-            scheduleNextCandidate(session, "Waiting for next question")
             return
         }
-        if (lastAnsweredDHash != null && consecutiveChangedScenes < 1) {
-            consecutiveChangedScenes++
-            QuestionMediaJanitor.delete(media)
-            scheduleNextCandidate(session, "Confirming scene change")
-            return
-        }
-        consecutiveChangedScenes = 0
         analyzeAutomaticImage(session, media, hash)
     }
 
@@ -358,8 +470,15 @@ class PracticeLensViewModel(
             )
         ) return
         automaticSingleFlight = false
-        _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = message) }
-        scheduleNextCandidate(automaticSessionGeneration, "Recovering")
+        automaticFocusSettled = false
+        _uiState.update {
+            it.copy(
+                automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
+                automaticStatus = message,
+                automaticCaptureQualityWarning = null,
+            )
+        }
+        beginFocusCycle(automaticSessionGeneration, "capture-error")
     }
 
     fun analyzeManualFullImage(media: CapturedQuestionMedia) {
@@ -394,15 +513,22 @@ class PracticeLensViewModel(
         }
     }
 
-    private fun requestAutomaticCapture(status: String) {
+    private fun requestAutomaticCapture(status: String, qualityWarning: String? = null, triggerReason: String) {
+        if (automaticSingleFlight) {
+            loopLog("capture-suppressed", automaticSessionGeneration, "single-flight")
+            return
+        }
         automaticSingleFlight = true
+        automaticFocusSettled = false
         _uiState.update {
             it.copy(
                 automaticState = AutomaticPracticeState.CAPTURING,
                 automaticStatus = status,
                 automaticCaptureRequestId = it.automaticCaptureRequestId + 1,
+                automaticCaptureQualityWarning = qualityWarning,
             )
         }
+        loopLog("capture-request", automaticSessionGeneration, triggerReason)
     }
 
     private fun analyzeAutomaticImage(session: Long, media: CapturedQuestionMedia, hash: String?) {
@@ -413,6 +539,7 @@ class PracticeLensViewModel(
                 val waitMs = (8_000L - (clock.nowMs() - lastModelRequestAtMs)).coerceAtLeast(0L)
                 if (waitMs > 0) delay(waitMs)
                 if (session != automaticSessionGeneration) {
+                    loopLog("model-cancelled", session, "stale-session")
                     QuestionMediaJanitor.delete(media)
                     return@launch
                 }
@@ -422,10 +549,12 @@ class PracticeLensViewModel(
                         automaticState = AutomaticPracticeState.ANALYZING,
                         automaticStatus = "Analyzing",
                         automaticRequestCount = it.automaticRequestCount + 1,
+                        automaticCaptureQualityWarning = null,
                     )
                 }
                 val result = interpreter.answerFromImage(media, _uiState.value.includeExplanation)
                 if (session != automaticSessionGeneration || hash != lastSubmittedDHash) {
+                    loopLog("model-cancelled", session, "stale-result")
                     QuestionMediaJanitor.delete(media)
                     return@launch
                 }
@@ -451,6 +580,7 @@ class PracticeLensViewModel(
                     it.copy(
                         automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
                         automaticStatus = e.message ?: "Recoverable model error",
+                        automaticCaptureQualityWarning = null,
                     )
                 }
                 scheduleNextCandidate(session, "Recovering")
@@ -460,6 +590,7 @@ class PracticeLensViewModel(
                     it.copy(
                         automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
                         automaticStatus = e.message ?: "Recoverable error",
+                        automaticCaptureQualityWarning = null,
                     )
                 }
                 scheduleNextCandidate(session, "Recovering")
@@ -470,17 +601,17 @@ class PracticeLensViewModel(
     private fun scheduleNextCandidate(session: Long, status: String) {
         automaticJob?.cancel()
         automaticJob = viewModelScope.launch {
+            consecutiveChangedScenes = 0
+            sceneCandidateDHash = null
             _uiState.update {
                 it.copy(
                     automaticState = AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE,
                     automaticStatus = status,
                     automaticResult = if (status.startsWith("Waiting")) it.automaticResult else null,
+                    automaticCaptureQualityWarning = null,
                 )
             }
-            delay(1_500)
-            if (session == automaticSessionGeneration && _uiState.value.automaticState == AutomaticPracticeState.WAITING_FOR_SCENE_CHANGE) {
-                requestAutomaticCapture("Checking scene")
-            }
+            loopLog("scene-wait", session, "result-delay-complete")
         }
     }
 
@@ -489,12 +620,15 @@ class PracticeLensViewModel(
         automaticJob = null
         automaticSessionGeneration++
         automaticSingleFlight = false
+        automaticFocusSettled = false
+        sceneCandidateDHash = null
         _uiState.update {
             it.copy(
                 scanning = false,
                 automaticState = AutomaticPracticeState.CONFIGURING,
                 automaticStatus = message,
                 automaticResult = null,
+                automaticCaptureQualityWarning = null,
             )
         }
     }
@@ -905,4 +1039,21 @@ class PracticeLensViewModel(
 
     private fun CapturedQuestionMedia.perceptualHash(): String? =
         qualityWarnings.firstOrNull { it.startsWith("dhash:") }?.removePrefix("dhash:")
+
+    private fun loopLog(state: String, session: Long, triggerReason: String, distance: Int? = null) {
+        val snapshot = _uiState.value
+        runCatching {
+            Log.d(
+                LOOP_TAG,
+                "state=$state automaticState=${snapshot.automaticState} session=$session captureGeneration=$captureGeneration " +
+                    "captureRequestId=${snapshot.automaticCaptureRequestId} trigger=$triggerReason distance=${distance ?: -1}",
+            )
+        }
+    }
+
+    private companion object {
+        const val LOOP_TAG = "PracticeLensLoop"
+        const val SCENE_CHANGE_HAMMING_THRESHOLD = 10
+        const val REQUIRED_CHANGED_OBSERVATIONS = 2
+    }
 }

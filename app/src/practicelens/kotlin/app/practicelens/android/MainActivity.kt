@@ -2,6 +2,7 @@ package app.practicelens.android
 
 import android.Manifest
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -66,6 +67,8 @@ import androidx.core.net.toFile
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import app.practicelens.android.camera.AndroidCropOcrProcessor
 import app.practicelens.android.camera.AndroidQuestionMediaProcessor
 import app.practicelens.android.camera.CameraScannerController
@@ -75,6 +78,7 @@ import app.practicelens.android.core.EvaluationState
 import app.practicelens.android.core.QuestionMediaJanitor
 import app.practicelens.android.ocr.OcrDraft
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 
 internal object AutomaticPracticeSettingsLayoutContract {
     const val title = "PracticeLens"
@@ -110,8 +114,49 @@ internal object AutomaticPracticeSettingsLayoutContract {
         estimatedContentHeightDp > viewportHeightDp
 }
 
+internal enum class PracticeLensRootRoute {
+    DISCLOSURE,
+    CAMERA_PERMISSION,
+    AUTOMATIC_PRACTICE,
+    MANUAL_AI_RESULT,
+    CROP_REVIEW,
+    QUESTION_REVIEW,
+    CAMERA_SCANNER,
+    ATTEMPT,
+    WAITING,
+}
+
+internal object PracticeLensRootRouter {
+    fun route(state: PracticeLensUiState): PracticeLensRootRoute =
+        when {
+            !state.disclosureAccepted -> PracticeLensRootRoute.DISCLOSURE
+            !state.cameraPermissionGranted && state.cameraPermissionPermanentlyDenied -> PracticeLensRootRoute.CAMERA_PERMISSION
+            state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE &&
+                state.automaticState != AutomaticPracticeState.CONFIGURING -> PracticeLensRootRoute.AUTOMATIC_PRACTICE
+            state.practiceMode == PracticeMode.MANUAL_CAPTURE &&
+                state.automaticState in setOf(
+                    AutomaticPracticeState.ANALYZING,
+                    AutomaticPracticeState.SHOWING_RESULT,
+                    AutomaticPracticeState.RECOVERABLE_ERROR,
+                ) -> PracticeLensRootRoute.MANUAL_AI_RESULT
+            state.capturedImage != null && state.croppedImage == null &&
+                state.practiceMode == PracticeMode.MANUAL_CROP_REVIEW -> PracticeLensRootRoute.CROP_REVIEW
+            state.ocrReview != null -> PracticeLensRootRoute.QUESTION_REVIEW
+            state.scanning -> PracticeLensRootRoute.CAMERA_SCANNER
+            state.attempt != null -> PracticeLensRootRoute.ATTEMPT
+            else -> PracticeLensRootRoute.WAITING
+        }
+}
+
 class MainActivity : ComponentActivity() {
-    private val viewModel: PracticeLensViewModel by viewModels()
+    private val disclosureStore: SharedPreferencesDisclosureAcceptanceStore by lazy {
+        SharedPreferencesDisclosureAcceptanceStore(
+            getSharedPreferences("practice_lens_preferences", MODE_PRIVATE),
+        )
+    }
+    private val viewModel: PracticeLensViewModel by viewModels {
+        PracticeLensViewModelFactory(disclosureStore)
+    }
     private val requestCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val permanentlyDenied = !granted && !shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
         viewModel.setCameraPermission(granted, permanentlyDenied)
@@ -164,28 +209,37 @@ fun PracticeLensApp(
         Surface(Modifier.fillMaxSize()) {
             val reviewDraft = state.ocrReview
             val capturedImage = state.capturedImage
-            when {
-                !state.cameraPermissionGranted && state.cameraPermissionPermanentlyDenied -> CameraPermissionScreen(
+            when (PracticeLensRootRouter.route(state)) {
+                PracticeLensRootRoute.DISCLOSURE -> DisclosureScreen(viewModel::acceptDisclosure)
+                PracticeLensRootRoute.CAMERA_PERMISSION -> CameraPermissionScreen(
                     permanentlyDenied = state.cameraPermissionPermanentlyDenied,
                     onRetry = onRequestCamera,
                     onOpenSettings = onOpenSettings,
                 )
-                state.practiceMode == PracticeMode.AUTOMATIC_AI_PRACTICE &&
-                    state.automaticState != AutomaticPracticeState.CONFIGURING -> AutomaticPracticeScreen(state, viewModel)
-                state.practiceMode == PracticeMode.MANUAL_CAPTURE &&
-                    state.automaticState in setOf(AutomaticPracticeState.ANALYZING, AutomaticPracticeState.SHOWING_RESULT, AutomaticPracticeState.RECOVERABLE_ERROR) ->
-                    ManualAiResultScreen(state, viewModel)
-                capturedImage != null && state.croppedImage == null && state.practiceMode == PracticeMode.MANUAL_CROP_REVIEW -> CropReviewScreen(capturedImage, viewModel)
-                reviewDraft != null -> QuestionReviewScreen(state, reviewDraft, viewModel)
-                state.scanning -> CameraScanner(
+                PracticeLensRootRoute.AUTOMATIC_PRACTICE -> AutomaticPracticeScreen(state, viewModel)
+                PracticeLensRootRoute.MANUAL_AI_RESULT -> ManualAiResultScreen(state, viewModel)
+                PracticeLensRootRoute.CROP_REVIEW -> CropReviewScreen(capturedImage!!, viewModel)
+                PracticeLensRootRoute.QUESTION_REVIEW -> QuestionReviewScreen(state, reviewDraft!!, viewModel)
+                PracticeLensRootRoute.CAMERA_SCANNER -> CameraScanner(
                     automatic = false,
+                    orientation = state.captureOrientation,
                     onReady = {},
+                    onStableFrame = { false },
+                    onSceneFingerprint = {},
                     captureRequestId = 0,
-                    onCaptured = if (state.practiceMode == PracticeMode.MANUAL_CAPTURE) viewModel::analyzeManualFullImage else viewModel::openCropReview,
+                    analysisResetId = 0,
+                    captureQualityWarning = null,
+                    onCaptured = { media, _ ->
+                        if (state.practiceMode == PracticeMode.MANUAL_CAPTURE) {
+                            viewModel.analyzeManualFullImage(media)
+                        } else {
+                            viewModel.openCropReview(media)
+                        }
+                    },
                     onError = viewModel::scannerFailed,
                 )
-                state.attempt != null -> AttemptScreen(state, viewModel)
-                else -> WaitingScreen(
+                PracticeLensRootRoute.ATTEMPT -> AttemptScreen(state, viewModel)
+                PracticeLensRootRoute.WAITING -> WaitingScreen(
                     state = state,
                     scannerError = state.scannerError,
                     onMode = viewModel::setPracticeMode,
@@ -356,13 +410,19 @@ private fun VerticalScrollThumb(scrollValue: Int, maxScrollValue: Int, modifier:
 @Composable
 private fun CameraScanner(
     automatic: Boolean,
+    orientation: CaptureOrientation,
     onReady: () -> Unit,
+    onStableFrame: () -> Boolean,
+    onSceneFingerprint: (String) -> Unit,
     captureRequestId: Long,
-    onCaptured: (CapturedQuestionMedia) -> Unit,
+    analysisResetId: Long,
+    captureQualityWarning: String?,
+    onCaptured: (CapturedQuestionMedia, Long) -> Unit,
     onError: (String) -> Unit,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val controller = remember { AtomicReference<CameraScannerController?>(null) }
+    val activeAutomaticRequestId = remember { AtomicLong(0) }
     var scannerStatus by remember { mutableStateOf("Frame the question, then capture.") }
     Box(Modifier.fillMaxSize()) {
         AndroidView(
@@ -372,11 +432,14 @@ private fun CameraScanner(
                         context = ctx,
                         lifecycleOwner = lifecycleOwner,
                         previewView = previewView,
-                        onCaptured = onCaptured,
+                        onCaptured = { media -> onCaptured(media, activeAutomaticRequestId.get()) },
                         onError = onError,
                         onStatus = { scannerStatus = it },
                         onReady = { if (automatic) onReady() },
-                        autoCaptureEnabled = false,
+                        onStableFrame = { automatic && onStableFrame() },
+                        onSceneFingerprint = { if (automatic) onSceneFingerprint(it) },
+                        orientation = orientation,
+                        autoCaptureEnabled = automatic,
                     )
                     controller.set(scannerController)
                     previewView.setTag(scannerController)
@@ -390,9 +453,16 @@ private fun CameraScanner(
                 controller.compareAndSet(releasedController, null)
             },
         )
+        LaunchedEffect(orientation) {
+            controller.get()?.updateTargetRotation(orientation)
+        }
+        LaunchedEffect(analysisResetId) {
+            if (automatic && analysisResetId > 0) controller.get()?.rearmAutomaticAnalysis()
+        }
         LaunchedEffect(captureRequestId) {
             if (automatic && captureRequestId > 0) {
-                if (controller.get()?.captureQuestion(manual = false) != true) {
+                activeAutomaticRequestId.set(captureRequestId)
+                if (controller.get()?.captureQuestion(manual = false, requestedWarning = captureQualityWarning) != true) {
                     scannerStatus = "Capture is already running."
                 }
             }
@@ -428,9 +498,14 @@ private fun AutomaticPracticeScreen(state: PracticeLensUiState, viewModel: Pract
     Box(Modifier.fillMaxSize()) {
         CameraScanner(
             automatic = true,
+            orientation = state.captureOrientation,
             onReady = viewModel::automaticCameraReady,
+            onStableFrame = viewModel::automaticStableFrameAccepted,
+            onSceneFingerprint = viewModel::automaticSceneObserved,
             captureRequestId = state.automaticCaptureRequestId,
-            onCaptured = viewModel::onAutomaticImageCaptured,
+            analysisResetId = state.automaticAnalysisResetId,
+            captureQualityWarning = state.automaticCaptureQualityWarning,
+            onCaptured = { media, requestId -> viewModel.onAutomaticImageCaptured(media, requestId) },
             onError = viewModel::automaticCaptureFailed,
         )
         Card(Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth()) {
@@ -449,6 +524,30 @@ private fun AutomaticPracticeScreen(state: PracticeLensUiState, viewModel: Pract
             }
         }
     }
+}
+
+class SharedPreferencesDisclosureAcceptanceStore(
+    private val preferences: SharedPreferences,
+) : DisclosureAcceptanceStore {
+    override fun isAccepted(): Boolean = preferences.getBoolean(KEY, false)
+    override fun setAccepted(accepted: Boolean) {
+        preferences.edit().putBoolean(KEY, accepted).apply()
+    }
+    override fun reset() {
+        preferences.edit().remove(KEY).apply()
+    }
+
+    private companion object {
+        const val KEY = "disclosure_accepted"
+    }
+}
+
+private class PracticeLensViewModelFactory(
+    private val disclosureStore: DisclosureAcceptanceStore,
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T =
+        PracticeLensViewModel(disclosureStore = disclosureStore) as T
 }
 
 @Composable

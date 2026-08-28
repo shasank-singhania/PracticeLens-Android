@@ -59,7 +59,7 @@ interface OptionAnchorDetector {
 
 class TextAndGeometryOptionAnchorDetector : OptionAnchorDetector {
     private val labelPattern = Regex("""^\s*[\(\[]?\s*([A-Ha-h1-8]|\d{1,2})\s*[\)\].:\-]\s+(.+?)\s*$""")
-    private val bulletPattern = Regex("""^\s*([•◦○●▪□☐])\s+(.+?)\s*$""")
+    private val bulletPattern = Regex("""^\s*([${OcrMcqExtractor.UTF8_BULLET_ANCHORS}])\s+(.+?)\s*$""")
     private val circleLikePattern = Regex("""^\s*([O0])\s+(.+?)\s*$""")
 
     override fun detect(lines: List<OcrTextLine>): List<OptionAnchor> {
@@ -467,7 +467,7 @@ class OcrMcqExtractor(
     }
 
     private fun hasLikelyMathOrUnsupportedSymbols(text: String): Boolean =
-        text.any { it in listOf('∑', '√', 'π', 'θ', '≤', '≥', '≠', '∞', '²', '³', '÷', '×') }
+        text.any { it in UTF8_MATH_SYMBOLS }
 
     private fun positioned(line: OcrTextLine): Boolean = line.right > line.left && line.bottom > line.top
 
@@ -480,4 +480,9 @@ class OcrMcqExtractor(
         height = source.height,
         durationMs = source.durationMs,
     )
+
+    companion object {
+        const val UTF8_BULLET_ANCHORS = "•◦○●▪□☐"
+        val UTF8_MATH_SYMBOLS = setOf('∑', '√', 'π', 'θ', '≤', '≥', '≠', '∞', '²', '³', '÷', '×')
+    }
 }

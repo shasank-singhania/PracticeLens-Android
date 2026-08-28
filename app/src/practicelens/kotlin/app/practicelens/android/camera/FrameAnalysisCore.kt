@@ -112,6 +112,8 @@ class StableOcrFrameAnalyzer<F : CloseableFrame>(
     private val detector: StableFrameDetector,
     private val onStable: () -> Unit,
     private val onRejected: (String) -> Unit = {},
+    private val onFrameAnalyzed: (FrameMetrics) -> Unit = {},
+    private val shouldConsumeStable: () -> Boolean = { true },
 ) {
     private val busy = AtomicBoolean(false)
     private val accepted = AtomicBoolean(false)
@@ -136,8 +138,9 @@ class StableOcrFrameAnalyzer<F : CloseableFrame>(
             return
         }
         try {
+            onFrameAnalyzed(metrics)
             val decision = detector.observe(metrics)
-            if (decision.accepted && accepted.compareAndSet(false, true)) {
+            if (decision.accepted && shouldConsumeStable() && accepted.compareAndSet(false, true)) {
                 onStable()
             } else {
                 onRejected(
@@ -161,6 +164,11 @@ class StableOcrFrameAnalyzer<F : CloseableFrame>(
 
     fun dispose() {
         disposed.set(true)
+        detector.reset()
+    }
+
+    fun resetAcceptance() {
+        accepted.set(false)
         detector.reset()
     }
 }
@@ -213,5 +221,10 @@ class ScannerStateMachine(
     fun cancel() {
         captureRunning = false
         phase = ScannerPhase.ERROR
+    }
+
+    fun readyForNextFrame() {
+        captureRunning = false
+        phase = ScannerPhase.FRAMING
     }
 }

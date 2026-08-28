@@ -1,12 +1,15 @@
 package app.practicelens.android
 
 import app.practicelens.android.camera.CloseableFrame
+import app.practicelens.android.camera.CameraUseCasePolicies
 import app.practicelens.android.camera.FrameMetrics
 import app.practicelens.android.camera.FrameMetricsCalculator
 import app.practicelens.android.camera.ScannerPhase
 import app.practicelens.android.camera.ScannerStateMachine
 import app.practicelens.android.camera.StableFrameDetector
 import app.practicelens.android.camera.StableOcrFrameAnalyzer
+import androidx.camera.core.ImageAnalysis
+import android.view.Surface
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -88,6 +91,44 @@ class AnalyzerLifecycleTest {
         assertEquals(ScannerPhase.FRAMING, state.tick())
         now = 9_001
         assertEquals(ScannerPhase.NEEDS_MANUAL_CAPTURE, state.tick())
+    }
+
+    @Test fun `automatic sessions enable analyzer with keep latest backpressure`() {
+        val policy = CameraUseCasePolicies.forSession(
+            autoCaptureEnabled = true,
+            orientation = CaptureOrientation.AUTO,
+            displayRotation = Surface.ROTATION_270,
+        )
+
+        assertTrue(policy.imageAnalysisEnabled)
+        assertEquals(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST, policy.analysisBackpressureStrategy)
+        assertEquals(Surface.ROTATION_270, policy.targetRotation)
+    }
+
+    @Test fun `manual sessions do not bind analyzer`() {
+        val policy = CameraUseCasePolicies.forSession(
+            autoCaptureEnabled = false,
+            orientation = CaptureOrientation.AUTO,
+            displayRotation = Surface.ROTATION_90,
+        )
+
+        assertFalse(policy.imageAnalysisEnabled)
+        assertEquals(null, policy.analysisBackpressureStrategy)
+    }
+
+    @Test fun `portrait landscape and auto rotations propagate to use cases`() {
+        assertEquals(
+            Surface.ROTATION_180,
+            CameraUseCasePolicies.forSession(true, CaptureOrientation.AUTO, Surface.ROTATION_180).targetRotation,
+        )
+        assertEquals(
+            Surface.ROTATION_0,
+            CameraUseCasePolicies.forSession(true, CaptureOrientation.PORTRAIT, Surface.ROTATION_270).targetRotation,
+        )
+        assertEquals(
+            Surface.ROTATION_90,
+            CameraUseCasePolicies.forSession(true, CaptureOrientation.LANDSCAPE, Surface.ROTATION_0).targetRotation,
+        )
     }
 
     @Test fun `state machine deduplicates concurrent capture requests`() {
