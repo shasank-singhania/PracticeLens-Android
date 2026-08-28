@@ -141,3 +141,5 @@ gradle/gradle-daemon-jvm.properties
 
 # Local unit test reports (build artifacts)
 测试报告/
+
+/app/google-services.json

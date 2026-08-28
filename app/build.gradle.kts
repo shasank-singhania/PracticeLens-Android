@@ -1,3 +1,4 @@
+import com.android.build.api.variant.BuildConfigField
 import java.io.FileInputStream
 import java.util.Properties
 
@@ -53,11 +54,17 @@ android {
             versionNameSuffix = "-demo"
             buildConfigField("Boolean", "DEMO_EVALUATOR", "true")
             buildConfigField("Boolean", "DRIVE_ENABLED", "false")
+            buildConfigField("Boolean", "ANSWER_BACKEND_GEMINI_ENABLED", "false")
+            buildConfigField("Boolean", "ANSWER_BACKEND_SIMULATED_ENABLED", "true")
+            buildConfigField("String", "DEFAULT_ANSWER_BACKEND", "\"SIMULATED\"")
         }
         create("production") {
             dimension = "distribution"
             buildConfigField("Boolean", "DEMO_EVALUATOR", "false")
             buildConfigField("Boolean", "DRIVE_ENABLED", "true")
+            buildConfigField("Boolean", "ANSWER_BACKEND_GEMINI_ENABLED", "true")
+            buildConfigField("Boolean", "ANSWER_BACKEND_SIMULATED_ENABLED", "false")
+            buildConfigField("String", "DEFAULT_ANSWER_BACKEND", "\"GEMINI\"")
         }
     }
 
@@ -124,6 +131,15 @@ android {
     }
     packaging {
         resources.excludes += setOf("META-INF/LICENSE*", "META-INF/AL2.0", "META-INF/LGPL2.1")
+    }
+}
+
+androidComponents {
+    onVariants(selector().withFlavor("distribution" to "production").withBuildType("debug")) { variant ->
+        variant.buildConfigFields.put(
+            "ANSWER_BACKEND_SIMULATED_ENABLED",
+            BuildConfigField("Boolean", "true", "Allow offline simulation only in productionDebug."),
+        )
     }
 }
 

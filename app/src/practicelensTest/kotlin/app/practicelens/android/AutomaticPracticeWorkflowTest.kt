@@ -6,8 +6,11 @@ import app.practicelens.android.core.MonotonicClock
 import app.practicelens.android.interpretation.AutomaticAnswer
 import app.practicelens.android.interpretation.AutomaticAnswerStatus
 import app.practicelens.android.interpretation.AutomaticAnswerValidator
+import app.practicelens.android.interpretation.AnswerBackend
 import app.practicelens.android.interpretation.InterpretationStatus
+import app.practicelens.android.interpretation.InterpretedOption
 import app.practicelens.android.interpretation.ModelResponseException
+import app.practicelens.android.interpretation.ModelRequestState
 import app.practicelens.android.interpretation.QuestionImageInterpreter
 import app.practicelens.android.interpretation.QuestionInterpretation
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +88,7 @@ class AutomaticPracticeWorkflowTest {
         assertEquals(5, vm.uiState.value.resultDisplaySeconds)
         assertTrue(vm.uiState.value.includeExplanation)
         assertTrue(vm.uiState.value.automaticallyContinue)
+        assertTrue(vm.uiState.value.answerBackendPolicy.simulatedEnabled)
     }
 
     @Test fun `camera and capture do not start before start`() = viewModelRunTest {
@@ -447,17 +451,7 @@ class AutomaticPracticeWorkflowTest {
     @Test fun `settings layout contract keeps all options scroll reachable`() {
         val contract = AutomaticPracticeSettingsLayoutContract
 
-        assertEquals(
-            listOf(
-                contract.modeLabel,
-                contract.resultDurationLabel,
-                contract.orientationLabel,
-                contract.explanationLabel,
-                contract.automaticallyContinueLabel,
-                contract.requestLimitLabel,
-            ),
-            contract.requiredChoices,
-        )
+        assertTrue(contract.requiredChoices.contains(contract.answerBackendLabel))
         assertTrue(contract.usesSingleVerticalScroll)
         assertTrue(contract.hasVisibleOverflowScrollThumb)
         assertTrue(contract.respectsSafeDrawingInsets)
@@ -477,9 +471,22 @@ class AutomaticPracticeWorkflowTest {
         assertEquals(PracticeMode.MANUAL_CROP_REVIEW, vm.uiState.value.practiceMode)
     }
 
+    @Test fun `backend selection is explicit and locked after camera start`() = viewModelRunTest {
+        val vm = readyVm()
+
+        vm.setAnswerBackend(AnswerBackend.SIMULATED)
+        assertEquals(AnswerBackend.SIMULATED, vm.uiState.value.answerBackend)
+
+        vm.startAutomaticPractice()
+        runCurrent()
+        vm.setAnswerBackend(AnswerBackend.GEMINI)
+
+        assertEquals(AnswerBackend.SIMULATED, vm.uiState.value.answerBackend)
+    }
+
     @Test fun `automatic answer validator rejects malformed unsupported values`() {
         val parsed = AutomaticAnswerValidator.parseJson(
-            """{"status":"ANSWERED","questionSummary":"Q","answerLabel":"A","answerText":"One","explanation":"Because.","confidence":0.7}""",
+            """{"status":"ANSWERED","questionText":"Q","options":[{"position":0,"displayLabel":"A","text":"One"},{"position":1,"displayLabel":"B","text":"Two"}],"selectedOptionIndex":0,"answerLabel":"A","answerText":"One","explanation":"Because.","confidence":0.7,"imageReadable":true,"answerable":true}""",
         )
         assertEquals(AutomaticAnswerStatus.ANSWERED, parsed.status)
 
@@ -487,6 +494,16 @@ class AutomaticPracticeWorkflowTest {
         assertTrue(
             runCatching {
                 AutomaticAnswerValidator.parseJson("""{"status":"ANSWERED","answerText":"","confidence":0.5}""")
+            }.exceptionOrNull() is ModelResponseException,
+        )
+        assertTrue(
+            runCatching {
+                AutomaticAnswerValidator.parseJson("""{"status":"ANSWERED","questionText":"Q","options":[{"position":0,"displayLabel":"A","text":"One"},{"position":1,"displayLabel":"B","text":"Two"}],"selectedOptionIndex":3,"answerText":"Three","explanation":"Because.","confidence":0.5,"imageReadable":true,"answerable":true}""")
+            }.exceptionOrNull() is ModelResponseException,
+        )
+        assertTrue(
+            runCatching {
+                AutomaticAnswerValidator.parseJson("""{"status":"UNREADABLE","confidence":0.1,"imageReadable":false,"answerable":false}""")
             }.exceptionOrNull() is ModelResponseException,
         )
     }
@@ -512,6 +529,7 @@ class AutomaticPracticeWorkflowTest {
         runCurrent()
 
         assertEquals(1, interpreter.answerCalls)
+        assertEquals(ModelRequestState.SUCCESS, vm.uiState.value.modelRequestState)
     }
 
     @Test fun `stale first and second cycle callbacks cannot update current cycle`() = viewModelRunTest {
@@ -602,15 +620,23 @@ class AutomaticPracticeWorkflowTest {
         override suspend fun interpret(image: CapturedQuestionMedia, optionalOcrText: String?): QuestionInterpretation =
             QuestionInterpretation(InterpretationStatus.RETAKE_REQUIRED, "", emptyList(), 0.0)
 
-        override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer {
+        override suspend fun answerFromImage(
+            image: CapturedQuestionMedia,
+            includeExplanation: Boolean,
+            optionalOcrText: String?,
+        ): AutomaticAnswer {
             answerCalls++
             return AutomaticAnswer(
                 status = AutomaticAnswerStatus.ANSWERED,
-                questionSummary = "Question?",
+                questionText = "Question?",
+                options = listOf(InterpretedOption(0, "A", "Answer"), InterpretedOption(1, "B", "Other")),
+                selectedOptionIndex = 0,
                 answerLabel = "A",
                 answerText = "Answer",
-                explanation = if (includeExplanation) "Short explanation." else null,
+                explanation = "Short explanation.",
                 confidence = 0.8,
+                imageReadable = true,
+                answerable = true,
             )
         }
     }

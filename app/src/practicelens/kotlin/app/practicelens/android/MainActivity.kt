@@ -76,6 +76,8 @@ import app.practicelens.android.camera.CropReviewGeometry
 import app.practicelens.android.core.CapturedQuestionMedia
 import app.practicelens.android.core.EvaluationState
 import app.practicelens.android.core.QuestionMediaJanitor
+import app.practicelens.android.interpretation.AnswerBackend
+import app.practicelens.android.interpretation.ModelRequestState
 import app.practicelens.android.ocr.OcrDraft
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicLong
@@ -84,6 +86,7 @@ internal object AutomaticPracticeSettingsLayoutContract {
     const val title = "PracticeLens"
     const val modeLabel = "Mode"
     const val resultDurationLabel = "Result display duration"
+    const val answerBackendLabel = "Answer backend"
     const val orientationLabel = "Capture orientation"
     const val explanationLabel = "Include explanation"
     const val automaticallyContinueLabel = "Automatically continue"
@@ -97,6 +100,7 @@ internal object AutomaticPracticeSettingsLayoutContract {
 
     val requiredChoices = listOf(
         modeLabel,
+        answerBackendLabel,
         resultDurationLabel,
         orientationLabel,
         explanationLabel,
@@ -243,6 +247,7 @@ fun PracticeLensApp(
                     state = state,
                     scannerError = state.scannerError,
                     onMode = viewModel::setPracticeMode,
+                    onAnswerBackend = viewModel::setAnswerBackend,
                     onResultDuration = viewModel::setResultDisplaySeconds,
                     onOrientation = viewModel::setCaptureOrientation,
                     onIncludeExplanation = viewModel::setIncludeExplanation,
@@ -298,6 +303,7 @@ private fun WaitingScreen(
     state: PracticeLensUiState,
     scannerError: String?,
     onMode: (PracticeMode) -> Unit,
+    onAnswerBackend: (AnswerBackend) -> Unit,
     onResultDuration: (Int) -> Unit,
     onOrientation: (CaptureOrientation) -> Unit,
     onIncludeExplanation: (Boolean) -> Unit,
@@ -326,6 +332,13 @@ private fun WaitingScreen(
                             PracticeMode.MANUAL_CROP_REVIEW -> "Manual crop and review"
                         },
                     )
+                }
+            }
+            Text(AutomaticPracticeSettingsLayoutContract.answerBackendLabel)
+            state.answerBackendPolicy.allowedBackends().forEach { backend ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = state.answerBackend == backend, onClick = { onAnswerBackend(backend) })
+                    Text(backend.displayText())
                 }
             }
             Text(AutomaticPracticeSettingsLayoutContract.resultDurationLabel)
@@ -511,6 +524,7 @@ private fun AutomaticPracticeScreen(state: PracticeLensUiState, viewModel: Pract
         Card(Modifier.align(Alignment.BottomCenter).padding(16.dp).fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(state.automaticStatus, style = MaterialTheme.typography.titleMedium)
+                AutomaticDiagnostics(state)
                 state.automaticResult?.let { AutomaticResultCard(it) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (state.automaticState == AutomaticPracticeState.PAUSED) {
@@ -519,6 +533,9 @@ private fun AutomaticPracticeScreen(state: PracticeLensUiState, viewModel: Pract
                         OutlinedButton(onClick = viewModel::pauseAutomaticPractice, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Pause") }
                     }
                     Button(onClick = viewModel::stopAutomaticPractice, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Stop") }
+                    if (state.automaticState == AutomaticPracticeState.RECOVERABLE_ERROR) {
+                        Button(onClick = viewModel::retryAutomaticFailure, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Retry") }
+                    }
                 }
                 Text("Requests ${state.automaticRequestCount}/${state.automaticRequestCeiling}")
             }
@@ -554,14 +571,21 @@ private class PracticeLensViewModelFactory(
 private fun ManualAiResultScreen(state: PracticeLensUiState, viewModel: PracticeLensViewModel) {
     Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(state.automaticStatus, style = MaterialTheme.typography.titleLarge)
+        AutomaticDiagnostics(state)
         state.automaticResult?.let { AutomaticResultCard(it) }
-        Button(onClick = viewModel::retake, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Capture another") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (state.automaticState == AutomaticPracticeState.RECOVERABLE_ERROR) {
+                Button(onClick = viewModel::retake, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Retry") }
+            }
+            Button(onClick = viewModel::retake, modifier = Modifier.sizeIn(minHeight = 48.dp)) { Text("Capture another") }
+        }
     }
 }
 
 @Composable
 private fun AutomaticResultCard(result: app.practicelens.android.interpretation.AutomaticAnswer) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (result.simulated) Text("Simulated result")
         result.questionSummary?.let { Text(it) }
         if (result.status == app.practicelens.android.interpretation.AutomaticAnswerStatus.ANSWERED) {
             Text("Answer: ${listOfNotNull(result.answerLabel, result.answerText).joinToString(" ")}")
@@ -572,6 +596,25 @@ private fun AutomaticResultCard(result: app.practicelens.android.interpretation.
         Text("Confidence ${"%.0f".format(result.confidence * 100)}%")
     }
 }
+
+@Composable
+private fun AutomaticDiagnostics(state: PracticeLensUiState) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text("Backend: ${state.answerBackend.displayText()}")
+        Text("Model: ${state.answerBackendPolicy.modelId}")
+        Text("Request: ${state.modelRequestState.displayText()}")
+        state.automaticError?.let { Text("Error: $it") }
+    }
+}
+
+private fun AnswerBackend.displayText(): String =
+    when (this) {
+        AnswerBackend.GEMINI -> "Gemini"
+        AnswerBackend.SIMULATED -> "Offline simulation"
+    }
+
+private fun ModelRequestState.displayText(): String =
+    name.lowercase().replaceFirstChar { it.uppercase() }
 
 @Composable
 private fun CropReviewScreen(media: CapturedQuestionMedia, viewModel: PracticeLensViewModel) {

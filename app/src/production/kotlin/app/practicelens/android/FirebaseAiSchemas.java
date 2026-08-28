@@ -65,13 +65,68 @@ public final class FirebaseAiSchemas {
     }
 
     public static Schema automaticAnswerSchema() {
+        Map<String, Schema> option = new LinkedHashMap<>();
+        option.put("position", Schema.numInt("Zero-based visual order.", false));
+        option.put("displayLabel", Schema.str("Visible option label such as A or 1.", false));
+        option.put("text", Schema.str("Option text, including wrapped visual lines.", false));
+
         Map<String, Schema> root = new LinkedHashMap<>();
         root.put("status", Schema.enumeration(Arrays.asList("ANSWERED", "UNREADABLE", "NO_SINGLE_MCQ", "UNSUPPORTED")));
-        root.put("questionSummary", Schema.str("Concise summary of the dominant visible MCQ.", false));
+        root.put("questionText", Schema.str("Concise text of the dominant visible MCQ.", false));
+        root.put(
+            "options",
+            Schema.array(
+                Schema.obj(option, Arrays.asList("position", "displayLabel", "text")),
+                "Two to eight visible choices in visual order.",
+                false,
+                "options",
+                2,
+                8
+            )
+        );
+        root.put("selectedOptionIndex", Schema.numInt("Zero-based index into options for the selected answer.", false));
         root.put("answerLabel", Schema.str("Visible answer label such as A or 1, if present.", false));
         root.put("answerText", Schema.str("Answer choice text. Required when ANSWERED.", false));
-        root.put("explanation", Schema.str("Optional concise learner-facing explanation.", false));
+        root.put("explanation", Schema.str("Concise learner-facing explanation. Required when ANSWERED.", false));
         root.put("confidence", Schema.numDouble("Confidence from 0.0 to 1.0.", false, "double", 0.0, 1.0));
-        return Schema.obj(root, Arrays.asList("status", "confidence"));
+        root.put(
+            "imageReadable",
+            new Schema(
+                "boolean",
+                "True when the image is readable enough to inspect the question and options.",
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+            )
+        );
+        root.put(
+            "answerable",
+            new Schema(
+                "boolean",
+                "True when a single MCQ and answer can be identified without guessing.",
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+            )
+        );
+        return Schema.obj(root, Arrays.asList("status", "confidence", "imageReadable", "answerable"));
     }
 }

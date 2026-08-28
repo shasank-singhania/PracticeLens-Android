@@ -1,5 +1,5 @@
 package app.practicelens.android.interpretation
 
 object InterpreterFactory {
-    fun create(): QuestionImageInterpreter = DemoQuestionImageInterpreter()
+    fun create(selectedBackend: () -> AnswerBackend): QuestionImageInterpreter = DemoQuestionImageInterpreter()
 }

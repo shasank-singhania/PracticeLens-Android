@@ -278,7 +278,11 @@ class ImageFirstWorkflowTest {
         override suspend fun interpret(image: CapturedQuestionMedia, optionalOcrText: String?): QuestionInterpretation =
             QuestionInterpretation(InterpretationStatus.RETAKE_REQUIRED, "", emptyList(), 0.0)
 
-        override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer =
+        override suspend fun answerFromImage(
+            image: CapturedQuestionMedia,
+            includeExplanation: Boolean,
+            optionalOcrText: String?,
+        ): AutomaticAnswer =
             AutomaticAnswer(AutomaticAnswerStatus.UNREADABLE, confidence = 0.0)
     }
 
@@ -295,7 +299,11 @@ class ImageFirstWorkflowTest {
             }
         }
 
-        override suspend fun answerFromImage(image: CapturedQuestionMedia, includeExplanation: Boolean): AutomaticAnswer =
+        override suspend fun answerFromImage(
+            image: CapturedQuestionMedia,
+            includeExplanation: Boolean,
+            optionalOcrText: String?,
+        ): AutomaticAnswer =
             AutomaticAnswer(AutomaticAnswerStatus.UNREADABLE, confidence = 0.0)
     }
 

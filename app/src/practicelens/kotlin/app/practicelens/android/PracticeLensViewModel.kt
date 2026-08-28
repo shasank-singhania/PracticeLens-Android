@@ -18,8 +18,11 @@ import app.practicelens.android.evaluation.EvaluatorFactory
 import app.practicelens.android.interpretation.InterpreterFactory
 import app.practicelens.android.interpretation.AutomaticAnswer
 import app.practicelens.android.interpretation.AutomaticAnswerStatus
+import app.practicelens.android.interpretation.AnswerBackend
+import app.practicelens.android.interpretation.AnswerBackendPolicy
 import app.practicelens.android.interpretation.InterpretationStatus
 import app.practicelens.android.interpretation.ModelResponseException
+import app.practicelens.android.interpretation.ModelRequestState
 import app.practicelens.android.interpretation.PracticeLensError
 import app.practicelens.android.interpretation.QuestionImageInterpreter
 import app.practicelens.android.ocr.OcrDraft
@@ -103,11 +106,20 @@ data class PracticeLensUiState(
     val automaticAnalysisResetId: Long = 0,
     val automaticRequestCount: Int = 0,
     val automaticRequestCeiling: Int = 30,
+    val answerBackendPolicy: AnswerBackendPolicy = AnswerBackendPolicy(
+        defaultBackend = runCatching { AnswerBackend.valueOf(BuildConfig.DEFAULT_ANSWER_BACKEND) }.getOrDefault(AnswerBackend.GEMINI),
+        geminiEnabled = BuildConfig.ANSWER_BACKEND_GEMINI_ENABLED,
+        simulatedEnabled = BuildConfig.ANSWER_BACKEND_SIMULATED_ENABLED,
+        modelId = BuildConfig.GEMINI_MODEL_ID,
+    ),
+    val answerBackend: AnswerBackend = answerBackendPolicy.defaultBackend,
+    val modelRequestState: ModelRequestState = ModelRequestState.IDLE,
+    val automaticError: PracticeLensError? = null,
 )
 
 class PracticeLensViewModel(
     private val clock: MonotonicClock = SystemMonotonicClock,
-    private val interpreter: QuestionImageInterpreter = InterpreterFactory.create(),
+    interpreter: QuestionImageInterpreter? = null,
     private val evaluator: GeminiEvaluator = EvaluatorFactory.create(),
     private val disclosureStore: DisclosureAcceptanceStore = InMemoryDisclosureAcceptanceStore(),
 ) : ViewModel() {
@@ -133,6 +145,8 @@ class PracticeLensViewModel(
     private val interpretedFingerprints = mutableSetOf<String>()
     private val _uiState = MutableStateFlow(PracticeLensUiState())
     val uiState: StateFlow<PracticeLensUiState> = _uiState
+    private val interpreter: QuestionImageInterpreter =
+        interpreter ?: InterpreterFactory.create { _uiState.value.answerBackend }
 
     init {
         _uiState.update { it.copy(disclosureAccepted = disclosureStore.isAccepted()) }
@@ -186,6 +200,8 @@ class PracticeLensViewModel(
                 automaticStatus = "Ready",
                 automaticResult = null,
                 automaticCaptureQualityWarning = null,
+                automaticError = null,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
     }
@@ -236,6 +252,16 @@ class PracticeLensViewModel(
         _uiState.update { it.copy(automaticallyContinue = enabled) }
     }
 
+    fun setAnswerBackend(backend: AnswerBackend) {
+        _uiState.update {
+            if (it.automaticState != AutomaticPracticeState.CONFIGURING || !it.answerBackendPolicy.isAllowed(backend)) {
+                it
+            } else {
+                it.copy(answerBackend = backend, automaticError = null, modelRequestState = ModelRequestState.IDLE)
+            }
+        }
+    }
+
     fun setAutomaticRequestCeiling(limit: Int) {
         if (limit in 1..100) _uiState.update { it.copy(automaticRequestCeiling = limit) }
     }
@@ -273,6 +299,8 @@ class PracticeLensViewModel(
                 automaticStatus = "Starting camera",
                 automaticResult = null,
                 automaticRequestCount = 0,
+                automaticError = null,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
         loopLog("start", session, "session-start")
@@ -336,6 +364,7 @@ class PracticeLensViewModel(
                 automaticStatus = "Focusing",
                 automaticCaptureQualityWarning = null,
                 automaticAnalysisResetId = it.automaticAnalysisResetId + 1,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
         loopLog("focus", session, triggerReason)
@@ -384,6 +413,7 @@ class PracticeLensViewModel(
                 automaticState = AutomaticPracticeState.PAUSED,
                 automaticStatus = "Paused",
                 automaticCaptureQualityWarning = null,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
     }
@@ -401,6 +431,7 @@ class PracticeLensViewModel(
                 automaticState = AutomaticPracticeState.CAMERA_STARTING,
                 automaticStatus = "Starting camera",
                 automaticCaptureQualityWarning = null,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
     }
@@ -421,8 +452,16 @@ class PracticeLensViewModel(
                 automaticStatus = "Stopped",
                 automaticResult = null,
                 automaticCaptureQualityWarning = null,
+                automaticError = null,
+                modelRequestState = ModelRequestState.IDLE,
             )
         }
+    }
+
+    fun retryAutomaticFailure() {
+        if (_uiState.value.automaticState != AutomaticPracticeState.RECOVERABLE_ERROR) return
+        _uiState.update { it.copy(automaticError = null, modelRequestState = ModelRequestState.IDLE) }
+        beginFocusCycle(automaticSessionGeneration, "user-retry")
     }
 
     fun onAutomaticImageCaptured(media: CapturedQuestionMedia, requestId: Long = _uiState.value.automaticCaptureRequestId) {
@@ -488,27 +527,46 @@ class PracticeLensViewModel(
                 scanning = false,
                 capturedImage = media,
                 automaticState = AutomaticPracticeState.ANALYZING,
-                automaticStatus = "Analyzing",
+                automaticStatus = "Sending ${it.answerBackend.visibleName()} request",
                 automaticResult = null,
+                automaticError = null,
+                modelRequestState = ModelRequestState.SENDING,
             )
         }
         interpretationJob = viewModelScope.launch {
             try {
+                _uiState.update { it.copy(automaticStatus = "Waiting for ${it.answerBackend.visibleName()} response", modelRequestState = ModelRequestState.WAITING) }
                 val result = interpreter.answerFromImage(media, _uiState.value.includeExplanation)
                 _uiState.update {
                     it.copy(
                         automaticState = AutomaticPracticeState.SHOWING_RESULT,
                         automaticStatus = if (result.status == AutomaticAnswerStatus.ANSWERED) "Answer" else result.status.name,
                         automaticResult = result,
+                        automaticError = null,
+                        modelRequestState = ModelRequestState.SUCCESS,
                     )
                 }
             } catch (e: CancellationException) {
                 QuestionMediaJanitor.delete(media)
                 throw e
             } catch (e: ModelResponseException) {
-                _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = e.message ?: "Image analysis failed.") }
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
+                        automaticStatus = e.message ?: "Image analysis failed.",
+                        automaticError = e.error,
+                        modelRequestState = ModelRequestState.ERROR,
+                    )
+                }
             } catch (e: Exception) {
-                _uiState.update { it.copy(automaticState = AutomaticPracticeState.RECOVERABLE_ERROR, automaticStatus = e.message ?: "Image analysis failed.") }
+                _uiState.update {
+                    it.copy(
+                        automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
+                        automaticStatus = e.message ?: "Image analysis failed.",
+                        automaticError = PracticeLensError.UNKNOWN,
+                        modelRequestState = ModelRequestState.ERROR,
+                    )
+                }
             }
         }
     }
@@ -547,11 +605,14 @@ class PracticeLensViewModel(
                 _uiState.update {
                     it.copy(
                         automaticState = AutomaticPracticeState.ANALYZING,
-                        automaticStatus = "Analyzing",
+                        automaticStatus = "Sending ${it.answerBackend.visibleName()} request",
                         automaticRequestCount = it.automaticRequestCount + 1,
                         automaticCaptureQualityWarning = null,
+                        automaticError = null,
+                        modelRequestState = ModelRequestState.SENDING,
                     )
                 }
+                _uiState.update { it.copy(automaticStatus = "Waiting for ${it.answerBackend.visibleName()} response", modelRequestState = ModelRequestState.WAITING) }
                 val result = interpreter.answerFromImage(media, _uiState.value.includeExplanation)
                 if (session != automaticSessionGeneration || hash != lastSubmittedDHash) {
                     loopLog("model-cancelled", session, "stale-result")
@@ -564,6 +625,8 @@ class PracticeLensViewModel(
                         automaticState = AutomaticPracticeState.SHOWING_RESULT,
                         automaticStatus = if (result.status == AutomaticAnswerStatus.ANSWERED) "Answer" else result.status.name,
                         automaticResult = result,
+                        automaticError = null,
+                        modelRequestState = ModelRequestState.SUCCESS,
                     )
                 }
                 delay(_uiState.value.resultDisplaySeconds * 1_000L)
@@ -581,9 +644,10 @@ class PracticeLensViewModel(
                         automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
                         automaticStatus = e.message ?: "Recoverable model error",
                         automaticCaptureQualityWarning = null,
+                        automaticError = e.error,
+                        modelRequestState = ModelRequestState.ERROR,
                     )
                 }
-                scheduleNextCandidate(session, "Recovering")
             } catch (e: Exception) {
                 QuestionMediaJanitor.delete(media)
                 _uiState.update {
@@ -591,9 +655,10 @@ class PracticeLensViewModel(
                         automaticState = AutomaticPracticeState.RECOVERABLE_ERROR,
                         automaticStatus = e.message ?: "Recoverable error",
                         automaticCaptureQualityWarning = null,
+                        automaticError = PracticeLensError.UNKNOWN,
+                        modelRequestState = ModelRequestState.ERROR,
                     )
                 }
-                scheduleNextCandidate(session, "Recovering")
             }
         }
     }
@@ -1057,3 +1122,9 @@ class PracticeLensViewModel(
         const val REQUIRED_CHANGED_OBSERVATIONS = 2
     }
 }
+
+private fun AnswerBackend.visibleName(): String =
+    when (this) {
+        AnswerBackend.GEMINI -> "Gemini"
+        AnswerBackend.SIMULATED -> "simulated"
+    }
