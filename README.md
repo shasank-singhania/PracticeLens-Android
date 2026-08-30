@@ -1,53 +1,36 @@
-# PracticeLens Android
+# PracticeLens Basic Gemini Loop
 
-PracticeLens is a foreground-camera Android practice assistant for self-study, mock tests, formative assessment, revision, and authorized practice material.
+PracticeLens is currently reduced to a smoke-test app: tap Start, capture one rear-camera image, send it to Firebase AI Logic Gemini once, display the raw Gemini text, wait five seconds, and repeat until Stop or backgrounding.
 
-It is not a live-exam assistant, cross-application answer tool, proctoring-evasion tool, overlay, automation utility, or APK updater.
+## Firebase requirement
 
-## Product Boundary
+The local Firebase project must be `practicelens-private`, and the debug package must be registered as `app.practicelens.android.debug`.
 
-PracticeLens uses only the in-app foreground rear camera. It does not declare or implement AccessibilityService, MediaProjection, screenshots, system overlays, floating windows, clipboard monitoring, notification listener capture, automated taps, package installation, or background camera capture.
-
-Default learner flow:
-
-1. Accept the foreground camera disclosure before settings or camera access.
-2. Choose automatic AI practice, manual capture, or manual crop review.
-3. In automatic practice, start the rear camera, wait for readiness and focus settle, capture on an acceptable stable frame, or use a bounded 4-second fallback still with a quality warning.
-4. Normalize captured JPEG orientation before fingerprinting and model submission.
-5. In manual crop review, run on-device OCR on the confirmed crop and let the learner correct the question/options. OCR remains diagnostic/editable assistance only.
-6. Optionally analyze the confirmed crop with production Firebase AI image interpretation.
-7. Let the learner confirm the editable question, then choose and revise an answer.
-8. Evaluate only after the selected option remains unchanged through the grace period.
-9. Show correctness, explanation, warning text, and a stoppable auto-next countdown.
-
-## Variants
-
-- `demo`: deterministic fake evaluator and offline/manual question review, no Firebase configuration, no Gemini calls, Drive disabled. Suitable for public CI and demo APK releases.
-- `production`: Firebase AI Logic with App Check for confirmed-crop interpretation/evaluation and production signing. History and Google Drive backup are planned surfaces until their user-facing wiring is completed.
-
-The demo debug APK application ID is `app.practicelens.android.autopractice.debug`.
-
-Manual state flow: `DISCLOSURE -> SETTINGS -> SCANNING -> CAPTURING -> CROP_REVIEW -> QUESTION_INTERPRETATION -> QUESTION_REVIEW -> ANSWERING -> GRACE_PERIOD -> EVALUATING -> RESULT` or `FAILED`.
-
-Automatic state flow: `DISCLOSURE -> SETTINGS -> START -> CAMERA_STARTING -> WAITING_FOR_FOCUS -> CAPTURING -> PREPARING_IMAGE -> ANALYZING -> SHOWING_RESULT -> WAITING_FOR_SCENE_CHANGE -> WAITING_FOR_FOCUS -> CAPTURING`, repeated for each changed question. CameraX `ImageAnalysis` remains active while the answer is displayed and while waiting for scene change, uses `STRATEGY_KEEP_ONLY_LATEST`, and requires two consecutive materially changed scene fingerprints before re-arming the next capture. Still capture and model submission never depend on OCR/parser validity.
+This smoke build intentionally does not initialize App Check. Firebase AI Logic baseline protection must temporarily be unenforced for this APK. Do not distribute this APK while App Check enforcement is disabled.
 
 ## Build
 
-```bash
-./gradlew testDemoDebugUnitTest
-./gradlew lintDemoDebug
-./gradlew assembleDemoDebug
+```powershell
+$repo = "D:\moved_from_C_drive_cleanup\Codex\2026-08-16\files-pasted-by-the-user-you\work\PracticeLens-Android"
+$jdk17 = "$repo\.toolchains\jdk-17.0.19+10"
+Set-Location $repo
+$env:JAVA_HOME = $jdk17
+$env:Path = "$jdk17\bin;$env:Path"
+$env:GRADLE_USER_HOME = "$repo\.gradle-user-home"
+.\gradlew.bat "-Dorg.gradle.java.home=$jdk17" "-Pkotlin.compiler.execution.strategy=in-process" clean :app:testDebugUnitTest :app:assembleDebug --console=plain --no-daemon
 ```
 
-Install and launch the demo debug APK on a connected device:
+## Install
 
-```bash
-adb install -r app/build/outputs/apk/demo/debug/app-demo-debug.apk
-adb shell am start -n app.practicelens.android.autopractice.debug/app.practicelens.android.MainActivity
+```powershell
+$adb = "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"
+& $adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
 
-Production release builds require protected signing and Firebase inputs. See `docs/RELEASE_SIGNING.md` and `docs/FIREBASE_SETUP.md`.
+## Device smoke test
 
-## License
-
-GNU AGPL-3.0. See `LICENSE` and `ATTRIBUTION.md`.
+1. Launch PracticeLens and tap Start.
+2. Show one page containing two clear multiple-choice questions.
+3. Confirm one automatic capture and one Gemini request.
+4. Confirm the raw Gemini response is visible and answers both questions.
+5. Confirm the next capture happens after the five-second display and one-second camera warm-up, then tap Stop.
